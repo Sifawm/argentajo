@@ -17,8 +17,8 @@ export interface JobRequest {
   edgeMarginMm: number;
   /** Bound on the nesting run, in seconds. */
   timeLimitS: number;
-  /** Library piece ids with their quantities. */
-  items: { id: string; quantity: number }[];
+  /** Library piece ids with a fixed quantity, or "fill" for as many as fit in the silver left. */
+  items: { id: string; quantity: { fixed: number } | "fill" }[];
 }
 
 /** Mirrors `core::nest::Layout`, with its page rendered by `core` as an SVG in mm. */

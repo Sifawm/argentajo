@@ -6,7 +6,8 @@ import { type JobRequest, type NestView, nestJob, PAPERS, stopNesting } from "./
 import type { PieceView } from "./library";
 
 type PaperName = keyof typeof PAPERS | "custom";
-type Item = JobRequest["items"][number];
+/** The quantity is kept while the item is on fill, for when it's switched back. */
+type Item = { id: string; quantity: number; fill: boolean };
 
 /** What Library thumbnails carry when dragged into the Job. */
 const DRAG_TYPE = "application/x-argentajo-piece";
@@ -49,14 +50,17 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     separationMm: separation,
     edgeMarginMm: edgeMargin,
     timeLimitS: timeLimit,
-    items: jobItems,
+    items: jobItems.map(({ id, quantity, fill }) => ({
+      id,
+      quantity: fill ? "fill" : { fixed: quantity },
+    })),
   };
   const valid =
     [...job.paper.sizeMm, ...sheet].every(isPositive) &&
     [printerMargin, separation, edgeMargin].every(isSpacing) &&
     isPositive(timeLimit) &&
     jobItems.length > 0 &&
-    jobItems.every((item) => Number.isInteger(item.quantity) && item.quantity > 0);
+    jobItems.every((item) => item.fill || (Number.isInteger(item.quantity) && item.quantity > 0));
 
   // The settings changed since the preview was calculated. The time limit doesn't change a Layout.
   const stale =
@@ -74,7 +78,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     setItems((items) =>
       items.some((item) => item.id === id)
         ? items.map((item) => (item.id === id ? { ...item, quantity: item.quantity + 1 } : item))
-        : [...items, { id, quantity: 1 }],
+        : [...items, { id, quantity: 1, fill: false }],
     );
 
   const onDrop = (e: DragEvent) => {
@@ -146,11 +150,14 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
 
   const counts = result?.job.items.flatMap((item, i) => {
     const piece = byId.get(item.id);
+    const fill = item.quantity === "fill";
     return piece
       ? [
           {
             piece,
-            quantity: item.quantity,
+            // Fill asks for as many as were placed.
+            quantity: item.quantity === "fill" ? result.view.placed[i] : item.quantity.fixed,
+            fill,
             placed: result.view.placed[i],
             missing: result.view.missing[i],
           },
@@ -159,7 +166,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
   });
   const missing = counts?.filter((count) => count.missing > 0);
   const placed = result?.view.placed.reduce((a, b) => a + b, 0) ?? 0;
-  const ordered = result?.job.items.reduce((total, item) => total + item.quantity, 0) ?? 0;
+  const ordered = counts?.reduce((total, count) => total + count.quantity, 0) ?? 0;
 
   return (
     <section className="flex min-h-0 flex-1 gap-6">
@@ -241,6 +248,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
                     min="1"
                     step="1"
                     aria-label={t("quantity")}
+                    disabled={item.fill}
                     value={Number.isNaN(item.quantity) ? "" : item.quantity}
                     onChange={(e) => {
                       const quantity = e.target.valueAsNumber;
@@ -248,8 +256,21 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
                         items.map((i) => (i.id === item.id ? { ...i, quantity } : i)),
                       );
                     }}
-                    className="w-16 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+                    className="w-16 rounded-md border border-zinc-300 px-2 py-1 text-sm disabled:opacity-40"
                   />
+                  <label className="flex items-center gap-1 text-xs" title={t("fillHint")}>
+                    <input
+                      type="checkbox"
+                      checked={item.fill}
+                      onChange={(e) => {
+                        const fill = e.target.checked;
+                        setItems((items) =>
+                          items.map((i) => (i.id === item.id ? { ...i, fill } : i)),
+                        );
+                      }}
+                    />
+                    {t("fill")}
+                  </label>
                   <button
                     type="button"
                     aria-label={t("remove")}
@@ -327,7 +348,9 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
               {counts?.map((count) => (
                 <li key={count.piece.id} className="flex items-center gap-2">
                   {thumbnail(count.piece, "size-8")}
-                  {t("placedOf", { placed: count.placed, quantity: count.quantity })}
+                  {count.fill
+                    ? t("placedFill", { placed: count.placed })
+                    : t("placedOf", { placed: count.placed, quantity: count.quantity })}
                   <button
                     type="button"
                     aria-label={t("exclude")}

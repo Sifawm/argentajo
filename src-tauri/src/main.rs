@@ -1,7 +1,7 @@
 // Prevents an additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use argentajo_core::nest::{Job, JobItem, Layout, Paper, nest, render_page};
+use argentajo_core::nest::{Job, JobItem, Layout, Paper, Quantity, nest, render_page};
 use argentajo_core::piece::{Piece, PrepareOptions, prepare_piece, split_piece};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -264,7 +264,7 @@ struct JobRequest {
 #[derive(Deserialize)]
 struct ItemRequest {
     id: String,
-    quantity: u32,
+    quantity: Quantity,
 }
 
 /// The Layout with its page rendered.

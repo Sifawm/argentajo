@@ -23,6 +23,8 @@
   "libraryHint": "Library: drag a piece into the list above, or click it to add one more.",
   "addPiece": "Add piece {{size}}",
   "quantity": "Quantity",
+  "fill": "Fill",
+  "fillHint": "As many as fit in the silver left after the fixed quantities",
   "remove": "Remove",
   "calculate": "Calculate",
   "recalculate": "Recalculate",
@@ -36,6 +38,7 @@
   "times": "{{count}} ×",
   "preview": "Page preview",
   "placedOf": "{{placed}} / {{quantity}}",
+  "placedFill": "{{placed}} (fill)",
   "exclude": "Exclude from the result",
   "stale": "Settings changed since this layout. Press Calculate to update it."
 }

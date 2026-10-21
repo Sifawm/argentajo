@@ -2,7 +2,8 @@
 //! assert invariants (no overlap, containment, separation, flags, all-or-nothing Parts, the missing
 //! report, utilisation) over fixed seeds rather than coordinates.
 
-use argentajo_core::nest::{Job, JobItem, Layout, Paper, Placement, nest, render_page};
+use argentajo_core::nest::Quantity::{Fill, Fixed};
+use argentajo_core::nest::{Job, JobItem, Layout, Paper, Placement, Quantity, nest, render_page};
 use argentajo_core::piece::{Piece, PrepareOptions, RealSize, prepare_piece};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -56,7 +57,7 @@ fn piece(contours: Vec<Vec<[f64; 2]>>, allow_rotation: bool, allow_mirror: bool)
     }
 }
 
-fn job(sheet_mm: [f64; 2], items: Vec<(Piece, u32)>) -> Job {
+fn job(sheet_mm: [f64; 2], items: Vec<(Piece, Quantity)>) -> Job {
     Job {
         paper: A4,
         sheet_mm,
@@ -182,11 +183,14 @@ fn assert_valid(job: &Job, layout: &Layout) {
     }
 
     for (i, item) in job.items.iter().enumerate() {
-        assert_eq!(
-            layout.placed[i] + layout.missing[i],
-            item.quantity,
-            "item {i}: placed and missing make up the quantity"
-        );
+        match item.quantity {
+            Fixed(quantity) => assert_eq!(
+                layout.placed[i] + layout.missing[i],
+                quantity,
+                "item {i}: placed and missing make up the quantity"
+            ),
+            Fill => assert_eq!(layout.missing[i], 0, "item {i}: fill is never missing"),
+        }
         for part in 0..item.piece.contours.len() {
             let n = layout
                 .placements
@@ -219,14 +223,14 @@ fn try_nest(job: &Job, seed: u64) -> Result<Layout, argentajo_core::nest::NestEr
     nest(job, seed, |_| {}, &AtomicBool::new(false))
 }
 
-fn mixed_items() -> Vec<(Piece, u32)> {
+fn mixed_items() -> Vec<(Piece, Quantity)> {
     vec![
-        (piece(vec![ell()], true, false), 5),
-        (piece(vec![triangle()], false, false), 4),
-        (piece(vec![ell()], false, true), 3),
+        (piece(vec![ell()], true, false), Fixed(5)),
+        (piece(vec![triangle()], false, false), Fixed(4)),
+        (piece(vec![ell()], false, true), Fixed(3)),
         (
             piece(vec![rect(12.0, 12.0), rect(5.0, 5.0)], true, false),
-            3,
+            Fixed(3),
         ),
     ]
 }
@@ -237,7 +241,10 @@ fn crowded_job(time_limit: Duration) -> Job {
         [120.0, 70.0],
         mixed_items()
             .into_iter()
-            .map(|(piece, quantity)| (piece, quantity * 6))
+            .map(|(piece, quantity)| match quantity {
+                Fixed(n) => (piece, Fixed(n * 6)),
+                Fill => (piece, Fill),
+            })
             .collect(),
     );
     job.time_limit = time_limit;
@@ -268,7 +275,7 @@ fn compacts_towards_one_end_of_the_sheet() {
     for (sheet, long_axis) in [([200.0, 50.0], 0), ([50.0, 200.0], 1)] {
         let job = job(
             sheet,
-            vec![(piece(vec![rect(10.0, 10.0)], false, false), 3)],
+            vec![(piece(vec![rect(10.0, 10.0)], false, false), Fixed(3))],
         );
         let layout = nest_valid(&job, 1);
         let far = layout
@@ -287,7 +294,7 @@ fn copies_that_do_not_fit_are_missing() {
     for seed in SEEDS {
         let job = job(
             [50.0, 30.0],
-            vec![(piece(vec![rect(10.0, 10.0)], false, false), 12)],
+            vec![(piece(vec![rect(10.0, 10.0)], false, false), Fixed(12))],
         );
         let layout = nest_valid(&job, seed);
         assert!(layout.missing[0] >= 4, "seed {seed}: {:?}", layout.missing);
@@ -301,8 +308,8 @@ fn a_piece_larger_than_the_sheet_is_missing() {
         let job = job(
             [50.0, 30.0],
             vec![
-                (piece(vec![rect(60.0, 40.0)], true, false), 2),
-                (piece(vec![rect(10.0, 10.0)], true, false), 2),
+                (piece(vec![rect(60.0, 40.0)], true, false), Fixed(2)),
+                (piece(vec![rect(10.0, 10.0)], true, false), Fixed(2)),
             ],
         );
         let layout = nest_valid(&job, seed);
@@ -318,7 +325,7 @@ fn a_copy_is_placed_with_all_its_parts_or_missing() {
             [30.0, 30.0],
             vec![(
                 piece(vec![rect(20.0, 20.0), rect(4.0, 4.0)], false, false),
-                3,
+                Fixed(3),
             )],
         );
         let layout = nest_valid(&job, seed);
@@ -341,7 +348,7 @@ fn a_piece_that_only_just_fits_across_is_placed_or_missing() {
     for seed in SEEDS {
         let job = job(
             [50.0, 30.0],
-            vec![(piece(vec![rect(26.98, 26.98)], false, false), 1)],
+            vec![(piece(vec![rect(26.98, 26.98)], false, false), Fixed(1))],
         );
         nest_valid(&job, seed);
     }
@@ -367,7 +374,7 @@ fn renders_the_page_in_mm_with_every_placed_part() {
         },
     )
     .unwrap();
-    let job = job([100.0, 60.0], vec![(ring, 3)]);
+    let job = job([100.0, 60.0], vec![(ring, Fixed(3))]);
     let layout = nest_valid(&job, 1);
     assert_eq!(layout.placements.len(), 6);
 
@@ -450,4 +457,67 @@ fn never_runs_past_the_time_limit() {
         start.elapsed()
     );
     assert_valid(&job, &layout);
+}
+
+#[test]
+fn fill_adds_copies_when_there_is_room() {
+    for seed in SEEDS {
+        let job = job(
+            [100.0, 50.0],
+            vec![(piece(vec![rect(10.0, 10.0)], false, false), Fill)],
+        );
+        let layout = nest_valid(&job, seed);
+        // 97 × 47 mm inside the edge margin: four rows of eight 10 mm squares at 1 mm apart.
+        assert!(layout.placed[0] >= 16, "seed {seed}: {:?}", layout.placed);
+    }
+}
+
+#[test]
+fn fixed_items_are_placed_before_fill() {
+    // Room for eight 10 mm squares: the six fixed ones come first, fill takes what's left.
+    for seed in SEEDS {
+        let job = job(
+            [50.0, 30.0],
+            vec![
+                (piece(vec![rect(10.0, 10.0)], false, false), Fill),
+                (piece(vec![rect(10.0, 10.0)], false, false), Fixed(6)),
+            ],
+        );
+        let layout = nest_valid(&job, seed);
+        assert_eq!(layout.placed[1], 6, "seed {seed}");
+        assert!(layout.placed[0] >= 1, "seed {seed}: {:?}", layout.placed);
+    }
+}
+
+#[test]
+fn fill_respects_flags_and_parts_around_fixed_items() {
+    for (seed, sheet) in SEEDS.into_iter().zip([[120.0, 70.0], [70.0, 120.0]]) {
+        let mut items = mixed_items();
+        items.extend([
+            (piece(vec![ell()], false, false), Fill),
+            (piece(vec![triangle()], true, true), Fill),
+            (
+                piece(vec![rect(8.0, 8.0), rect(3.0, 3.0)], false, false),
+                Fill,
+            ),
+        ]);
+        let job = job(sheet, items);
+        let layout = nest_valid(&job, seed);
+        assert_eq!(layout.missing, [0; 7], "{sheet:?}");
+        assert!(
+            layout.placed[4..].iter().all(|&n| n >= 1),
+            "{sheet:?}: {:?}",
+            layout.placed
+        );
+    }
+}
+
+#[test]
+fn fill_that_does_not_fit_is_not_missing() {
+    let job = job(
+        [50.0, 30.0],
+        vec![(piece(vec![rect(60.0, 40.0)], true, false), Fill)],
+    );
+    let layout = nest_valid(&job, 1);
+    assert_eq!((layout.placed[0], layout.missing[0]), (0, 0));
 }

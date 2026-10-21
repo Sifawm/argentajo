@@ -3,9 +3,12 @@
 use crate::piece::Piece;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use jagua_rs::Instant;
-use jagua_rs::io::ext_repr::{ExtOrientation, ExtRotation, ExtSPolygon, ExtShape};
-use jagua_rs::io::import::Importer;
-use jagua_rs::probs::spp::entities::SPSolution;
+use jagua_rs::geometry::DTransformation;
+use jagua_rs::io::ext_repr::{
+    ExtOrientation, ExtPlacedItem, ExtRotation, ExtSPolygon, ExtShape, ExtTransformation,
+};
+use jagua_rs::io::import::{Importer, ext_to_int_transformation};
+use jagua_rs::probs::spp::entities::{SPPlacement, SPProblem, SPSolution};
 use jagua_rs::probs::spp::io::ext_repr::{ExtItem, ExtSPInstance};
 use jagua_rs::probs::spp::io::{export, import_instance};
 use rand::SeedableRng;
@@ -14,10 +17,13 @@ use serde::{Deserialize, Serialize};
 use sparrow::config::{DEFAULT_SPARROW_CONFIG, ShrinkDecayStrategy};
 use sparrow::consts::{
     DEFAULT_COMPRESS_TIME_RATIO, DEFAULT_EXPLORE_TIME_RATIO, DEFAULT_FAIL_DECAY_RATIO_CMPR,
-    DEFAULT_MAX_CONSEQ_FAILS_EXPL,
+    DEFAULT_MAX_CONSEQ_FAILS_EXPL, LBF_SAMPLE_CONFIG,
 };
+use sparrow::eval::lbf_evaluator::LBFEvaluator;
+use sparrow::eval::sample_eval::SampleEval;
 use sparrow::optimizer::lbf::ConstructionError;
 use sparrow::optimizer::optimize;
+use sparrow::sample::search::search_placement;
 use sparrow::util::listener::{ReportType, SolutionListener};
 use sparrow::util::terminator::{BasicTerminator, Terminator};
 use std::fmt::Write;
@@ -53,7 +59,26 @@ pub struct Job {
 #[derive(Clone, Debug, PartialEq)]
 pub struct JobItem {
     pub piece: Piece,
-    pub quantity: u32,
+    pub quantity: Quantity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Quantity {
+    /// This many copies, or as many as fit, the rest missing.
+    Fixed(u32),
+    /// As many copies as fit in the silver the fixed quantities leave. Never missing.
+    Fill,
+}
+
+impl Quantity {
+    /// The copies that must be placed.
+    fn fixed(self) -> u32 {
+        match self {
+            Self::Fixed(n) => n,
+            Self::Fill => 0,
+        }
+    }
 }
 
 /// The nesting result.
@@ -111,11 +136,13 @@ impl std::fmt::Display for NestError {
 impl std::error::Error for NestError {}
 
 /// Strip-packs the fixed quantities along the Sheet's long side with sparrow, compacted towards
-/// its start. Copies past the Sheet's end, or that don't fit it at all, are missing.
+/// its start. Copies past the Sheet's end, or that don't fit it at all, are missing. Copies of
+/// Fill items then go into the silver left over, as many as fit.
 ///
 /// Runs until the Job's time limit or `cancel`, though always until a first Layout, and returns the
-/// best Layout found: the most silver used, then the shortest stretch of Sheet. `on_progress` gets each Layout
-/// better than the last, so the last one it gets is the one returned.
+/// best Layout found: the most silver used by fixed quantities, then the shortest stretch of Sheet
+/// they take. `on_progress` gets each Layout better than the last, so the last one it gets is the
+/// one returned.
 pub fn nest(
     job: &Job,
     seed: u64,
@@ -162,7 +189,7 @@ pub fn nest(
         .items
         .iter()
         .enumerate()
-        .filter(|(_, item)| item.quantity > 0)
+        .filter(|(_, item)| item.quantity != Quantity::Fixed(0))
         .flat_map(|(i, item)| (0..item.piece.contours.len()).map(move |part| (i, part)))
         .collect();
     // Pieces with a Part too wide for the Sheet whichever way it may turn: all their copies are missing.
@@ -180,123 +207,280 @@ pub fn nest(
             .collect();
         unplaceable[i] |= !fits_across(&contour, piece.allow_rotation, across);
     }
-    // Per Part, the placements that end before the Sheet's far edge margin, nearest the start first,
-    // as a Layout with the length of Sheet it uses.
-    // ponytail: copies past the end are dropped from the full-quantity solution, leaving their gaps;
-    // re-run sparrow on what fits if those gaps ever matter.
+    let ext_item = |id: usize, demand: u64| {
+        let (i, part) = parts[id];
+        let piece = &job.items[i].piece;
+        ExtItem {
+            base: jagua_rs::io::ext_repr::ExtItem {
+                id: id as u64,
+                orientation: ExtOrientation {
+                    // Not `Continuous`: sparrow then bounds the strip by area alone and, with
+                    // few copies, tries strips shorter than a piece (its loss goes infinite).
+                    rotation: if piece.allow_rotation {
+                        ExtRotation::Stepped { step: 1.0 }
+                    } else {
+                        ExtRotation::Discrete { angles: vec![0.0] }
+                    },
+                    reflection_axes: if piece.allow_mirror {
+                        vec![mirror_axis]
+                    } else {
+                        vec![]
+                    },
+                },
+                shape: ExtShape::SimplePolygon(ExtSPolygon(
+                    piece.contours[part]
+                        .iter()
+                        .map(|&p| {
+                            let [x, y] = apply(into_strip, p);
+                            (x as f32, y as f32)
+                        })
+                        .collect(),
+                )),
+                min_quality: None,
+            },
+            demand,
+        }
+    };
+    let instance = |items| ExtSPInstance {
+        name: String::new(),
+        min_item_separation: separation as f32,
+        items,
+        strip_height: (short - 2.0 * inset) as f32,
+    };
+    // In the strip, the end of the Sheet's far edge margin.
     let end = long - margin - inset;
-    let layout_of = |unplaceable: &[bool], solution: Solution| {
+
+    // Per Part, the placements that end before the Sheet's far edge margin, nearest the start first,
+    // with the length of Sheet they use.
+    // ponytail: copies past the end are dropped from the full-quantity solution, leaving their gaps
+    // for fill only; re-run sparrow on what fits if those gaps ever matter.
+    let keep = |unplaceable: &[bool], solution: Solution| {
         let mut fitting = vec![vec![]; parts.len()];
-        for (id, transform) in solution {
-            let (i, part) = parts[id as usize];
-            let in_strip = compose(transform, into_strip);
+        for placed in solution {
+            let (i, part) = parts[placed.item_id as usize];
+            let in_strip = compose(affine(&placed.transformation), into_strip);
             let reach = job.items[i].piece.contours[part]
                 .iter()
                 .map(|&p| apply(in_strip, p)[0])
                 .fold(f64::NEG_INFINITY, f64::max);
             if reach <= end {
-                fitting[id as usize].push((reach, compose(to_sheet, in_strip)));
+                fitting[placed.item_id as usize].push((reach, placed));
             }
         }
-        let mut placed: Vec<u32> = job.items.iter().map(|item| item.quantity).collect();
+        let mut placed: Vec<u32> = job.items.iter().map(|item| item.quantity.fixed()).collect();
         for (&(i, _), fits) in parts.iter().zip(&mut fitting) {
             placed[i] = placed[i].min(fits.len() as u32);
             fits.sort_by(|a, b| a.0.total_cmp(&b.0));
         }
-        for (placed, &unplaceable) in placed.iter_mut().zip(unplaceable) {
-            if unplaceable {
-                *placed = 0;
+        let mut kept = vec![];
+        let mut length = 0.0f64;
+        for (&(i, _), fits) in parts.iter().zip(fitting) {
+            let n = if unplaceable[i] {
+                0
+            } else {
+                placed[i] as usize
+            };
+            for (reach, placed) in fits.into_iter().take(n) {
+                length = length.max(reach);
+                kept.push(placed);
             }
         }
+        (kept, length)
+    };
 
-        let mut placements = vec![];
-        let mut area = 0.0;
-        let mut length = 0.0f64;
-        for (&(item, part), fits) in parts.iter().zip(&fitting) {
-            let n = placed[item] as usize;
-            area += n as f64 * polygon_area(&job.items[item].piece.contours[part]);
-            length = fits[..n].iter().map(|f| f.0).fold(length, f64::max);
-            placements.extend(fits[..n].iter().map(|&(_, transform)| Placement {
-                item,
-                part,
-                transform,
-            }));
+    // The Fill items' Parts with the fixed ones, on the whole usable Sheet, for `fill`; and per
+    // Fill item, its Parts' indices there.
+    let fillable: Vec<usize> = (0..job.items.len())
+        .filter(|&i| job.items[i].quantity == Quantity::Fill && !unplaceable[i])
+        .collect();
+    let filler = if fillable.is_empty() {
+        None
+    } else {
+        let items = (0..parts.len())
+            .filter(|&id| !unplaceable[parts[id].0])
+            .map(|id| {
+                let (i, part) = parts[id];
+                let demand = match job.items[i].quantity {
+                    Quantity::Fixed(n) => n as u64,
+                    // More copies than could ever fit.
+                    // ponytail: capped at 10,001 copies against a degenerate zero-area Part; lift
+                    // the cap if pieces ever get that small.
+                    Quantity::Fill => {
+                        (w * h / polygon_area(&job.items[i].piece.contours[part])).min(1e4) as u64
+                            + 1
+                    }
+                };
+                ext_item(id, demand)
+            })
+            .collect();
+        let engine = |e: anyhow::Error| NestError::Engine(e.to_string());
+        let config = DEFAULT_SPARROW_CONFIG;
+        let importer = Importer::new(
+            config.cde_config,
+            config.poly_simpl_tolerance,
+            config.narrow_concavity_cutoff_ratio,
+        );
+        let mut empty =
+            SPProblem::new(import_instance(&importer, &instance(items)).map_err(engine)?)
+                .map_err(engine)?;
+        empty
+            .change_strip_width((long - 2.0 * inset) as f32)
+            .map_err(engine)?;
+        let item_idx = |id: usize| empty.instance().item_idx(id as u64).unwrap();
+        let fills: Vec<Vec<usize>> = fillable
+            .iter()
+            .map(|&i| {
+                (0..parts.len())
+                    .filter(|&id| parts[id].0 == i)
+                    .map(item_idx)
+                    .collect()
+            })
+            .collect();
+        Some((empty, fills))
+    };
+    // `kept` with copies of the Fill items inserted one by one into the free space, in turn, each
+    // at the sampled spot nearest the start of the Sheet where all its Parts fit, until none fits
+    // or, unless it must `finish`, the run ends; and whether it got that far.
+    // ponytail: greedy insertion, no copy is moved to make room for another; upgrade to a knapsack
+    // optimiser on jagua-rs, or re-run sparrow with growing fill counts, if fill quality matters.
+    let fill = |kept: Solution, finish: bool| -> (Solution, bool) {
+        let Some((empty, fills)) = &filler else {
+            return (kept, true);
+        };
+        let mut prob = empty.clone();
+        let instance = empty.instance();
+        for placed in kept {
+            let item_idx = instance
+                .item_idx(placed.item_id)
+                .expect("kept parts are placeable");
+            let d_transf = ext_to_int_transformation(
+                &DTransformation::from(placed.transformation),
+                &instance.item(item_idx).shape_orig().pre_transform,
+            );
+            prob.place_item(SPPlacement { item_idx, d_transf });
         }
-        let layout = Layout {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+        let mut active: Vec<&[usize]> = fills.iter().map(Vec::as_slice).collect();
+        let ended = || !finish && (cancel.load(Ordering::Relaxed) || Instant::now() > deadline);
+        while !active.is_empty() && !ended() {
+            active.retain(|copy| {
+                if ended() {
+                    return true;
+                }
+                let mut placed = vec![];
+                for &item_idx in *copy {
+                    let item = instance.item(item_idx);
+                    let evaluator = LBFEvaluator::new(prob.layout(), item);
+                    let (sample, _) = search_placement(
+                        prob.layout(),
+                        item,
+                        None,
+                        evaluator,
+                        LBF_SAMPLE_CONFIG,
+                        &mut rng,
+                    );
+                    match sample {
+                        Some((d_transf, SampleEval::Clear { .. }))
+                            if prob.item_demand_qtys()[item_idx] > 0 =>
+                        {
+                            placed.push(prob.place_item(SPPlacement { item_idx, d_transf }))
+                        }
+                        // All its Parts or none.
+                        _ => {
+                            for key in placed {
+                                prob.remove_item(key);
+                            }
+                            return false;
+                        }
+                    }
+                }
+                true
+            });
+        }
+        (
+            export(&prob.save(), *sparrow::EPOCH).layout.placed_items,
+            active.is_empty(),
+        )
+    };
+
+    let layout_of = |solution: &Solution| {
+        let mut counts = vec![0u32; parts.len()];
+        let mut area = 0.0;
+        let placements = solution
+            .iter()
+            .map(|placed| {
+                let id = placed.item_id as usize;
+                let (item, part) = parts[id];
+                counts[id] += 1;
+                area += polygon_area(&job.items[item].piece.contours[part]);
+                Placement {
+                    item,
+                    part,
+                    transform: compose(
+                        to_sheet,
+                        compose(affine(&placed.transformation), into_strip),
+                    ),
+                }
+            })
+            .collect();
+        // A copy is placed with all its Parts.
+        let placed: Vec<u32> = (0..job.items.len())
+            .map(|i| {
+                parts
+                    .iter()
+                    .zip(&counts)
+                    .filter(|((item, _), _)| *item == i)
+                    .map(|(_, &n)| n)
+                    .min()
+                    .unwrap_or(0)
+            })
+            .collect();
+        Layout {
             sheet_origin_mm: [margin_mm, margin_mm],
             placements,
             missing: job
                 .items
                 .iter()
                 .zip(&placed)
-                .map(|(item, placed)| item.quantity - placed)
+                .map(|(item, placed)| item.quantity.fixed().saturating_sub(*placed))
                 .collect(),
             placed,
             utilisation: area / (w * h),
-        };
-        (layout, length)
+        }
     };
 
-    let mut best: Option<(Layout, f64)> = None;
+    // With the fixed quantities' share of the silver and length of Sheet.
+    let mut best: Option<(Layout, f64, f64)> = None;
     loop {
-        let items: Vec<ExtItem> = parts
-            .iter()
-            .enumerate()
-            .filter(|(_, (i, _))| !unplaceable[*i])
-            .map(|(id, &(i, part))| {
-                let piece = &job.items[i].piece;
-                ExtItem {
-                    base: jagua_rs::io::ext_repr::ExtItem {
-                        id: id as u64,
-                        orientation: ExtOrientation {
-                            // Not `Continuous`: sparrow then bounds the strip by area alone and, with
-                            // few copies, tries strips shorter than a piece (its loss goes infinite).
-                            rotation: if piece.allow_rotation {
-                                ExtRotation::Stepped { step: 1.0 }
-                            } else {
-                                ExtRotation::Discrete { angles: vec![0.0] }
-                            },
-                            reflection_axes: if piece.allow_mirror {
-                                vec![mirror_axis]
-                            } else {
-                                vec![]
-                            },
-                        },
-                        shape: ExtShape::SimplePolygon(ExtSPolygon(
-                            piece.contours[part]
-                                .iter()
-                                .map(|&p| {
-                                    let [x, y] = apply(into_strip, p);
-                                    (x as f32, y as f32)
-                                })
-                                .collect(),
-                        )),
-                        min_quality: None,
-                    },
-                    demand: job.items[i].quantity as u64,
-                }
+        let items: Vec<ExtItem> = (0..parts.len())
+            .filter(|&id| {
+                let i = parts[id].0;
+                !unplaceable[i] && job.items[i].quantity.fixed() > 0
             })
+            .map(|id| ext_item(id, job.items[parts[id].0].quantity.fixed() as u64))
             .collect();
         if items.is_empty() {
             break;
         }
-        let instance = ExtSPInstance {
-            name: String::new(),
-            min_item_separation: separation as f32,
-            items,
-            strip_height: (short - 2.0 * inset) as f32,
-        };
         let on_solution = |solution| {
-            let (layout, length) = layout_of(&unplaceable, solution);
-            let better = best.as_ref().is_none_or(|(best, best_length)| {
-                (layout.utilisation, -length) > (best.utilisation, -best_length)
+            let (kept, length) = keep(&unplaceable, solution);
+            let fixed = layout_of(&kept).utilisation;
+            let better = best.as_ref().is_none_or(|(_, best_fixed, best_length)| {
+                (fixed, -length) > (*best_fixed, -best_length)
             });
-            if better {
+            if !better {
+                return;
+            }
+            // The first Layout is always filled whole, like it is always waited for. A later fill
+            // the run ended in the middle of can't stand in for a whole one.
+            let (filled, whole) = fill(kept, best.is_none());
+            if whole {
+                let layout = layout_of(&filled);
                 on_progress(&layout);
-                best = Some((layout, length));
+                best = Some((layout, fixed, length));
             }
         };
-        match strip_pack(instance, seed, deadline, cancel, on_solution) {
+        match strip_pack(instance(items), seed, deadline, cancel, on_solution) {
             Ok(()) => break,
             // A Part that only just fits across on paper, but not once jagua-rs has simplified and
             // inflated it: missing too.
@@ -308,7 +492,15 @@ pub fn nest(
             },
         }
     }
-    Ok(best.map_or_else(|| layout_of(&unplaceable, vec![]).0, |(layout, _)| layout))
+    Ok(match best {
+        Some((layout, ..)) => layout,
+        // No fixed quantities to place: only fill.
+        None => {
+            let layout = layout_of(&fill(vec![], true).0);
+            on_progress(&layout);
+            layout
+        }
+    })
 }
 
 /// Whether `contour` fits in a strip `width` across, in some orientation it may take.
@@ -329,8 +521,7 @@ fn fits_across(contour: &[[f64; 2]], allow_rotation: bool, width: f64) -> bool {
 }
 
 /// Runs sparrow until `deadline` or `cancel`, passing each feasible solution it reaches, every one
-/// narrower than the last, to `on_solution` as (item id, transformation of the item's shape into
-/// the strip).
+/// narrower than the last, to `on_solution`.
 ///
 /// sparrow runs on its own thread: it checks for the end only between steps, and some steps take
 /// seconds on a crowded strip. This returns at the deadline or on cancel all the same, once there
@@ -387,11 +578,16 @@ fn strip_pack(
                 on_solution(solution);
             }
             Err(RecvTimeoutError::Timeout) => {}
-            // jagua-rs asserts on some degenerate input; that must not take the caller down.
+            // jagua-rs asserts on some degenerate input (10 mm squares, seed 2); that must not take
+            // the caller down, nor lose the solutions so far.
+            // ponytail: a crash after a first solution ends the run quietly with the best so far;
+            // report it if early ends ever need explaining.
             Err(RecvTimeoutError::Disconnected) => {
-                return sparrow
-                    .join()
-                    .unwrap_or_else(|_| Err(anyhow::anyhow!("the nesting engine crashed")));
+                return match sparrow.join() {
+                    Ok(result) => result,
+                    Err(_) if solved => Ok(()),
+                    Err(_) => Err(anyhow::anyhow!("the nesting engine crashed")),
+                };
             }
         }
         if solved && (cancel.load(Ordering::Relaxed) || Instant::now() > deadline) {
@@ -410,24 +606,9 @@ impl SolutionListener for Listener {
             return;
         }
         // Fails only once `strip_pack` has returned, and then nobody is listening.
-        _ = self.0.send(
-            export(solution, *sparrow::EPOCH)
-                .layout
-                .placed_items
-                .into_iter()
-                .map(|placed| {
-                    let t = placed.transformation;
-                    let (sin, cos) = (t.rotation as f64).to_radians().sin_cos();
-                    // Reflect (y negated), then rotate, then translate.
-                    let reflect = if t.reflected { -1.0 } else { 1.0 };
-                    let (x, y) = t.translation;
-                    (
-                        placed.item_id,
-                        [cos, sin, -sin * reflect, cos * reflect, x as f64, y as f64],
-                    )
-                })
-                .collect(),
-        );
+        _ = self
+            .0
+            .send(export(solution, *sparrow::EPOCH).layout.placed_items);
     }
 }
 
@@ -512,8 +693,16 @@ fn points(polygon: &[[f64; 2]]) -> String {
 /// An affine transformation in SVG `matrix(a b c d e f)` order.
 type Affine = [f64; 6];
 
-/// A sparrow solution: per placed item, its id and the transformation of its shape into the strip.
-type Solution = Vec<(u64, Affine)>;
+/// A jagua-rs solution: per placed item, its id and the transformation of its shape into the strip.
+type Solution = Vec<ExtPlacedItem>;
+
+fn affine(t: &ExtTransformation) -> Affine {
+    let (sin, cos) = (t.rotation as f64).to_radians().sin_cos();
+    // Reflect (y negated), then rotate, then translate.
+    let reflect = if t.reflected { -1.0 } else { 1.0 };
+    let (x, y) = t.translation;
+    [cos, sin, -sin * reflect, cos * reflect, x as f64, y as f64]
+}
 
 const fn translate(x: f64, y: f64) -> Affine {
     [1.0, 0.0, 0.0, 1.0, x, y]

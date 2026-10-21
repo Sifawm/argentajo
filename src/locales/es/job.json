@@ -23,6 +23,8 @@
   "libraryHint": "Biblioteca: arrastra una pieza a la lista de arriba o haz clic para añadir una más.",
   "addPiece": "Añadir pieza {{size}}",
   "quantity": "Cantidad",
+  "fill": "Rellenar",
+  "fillHint": "Tantas como quepan en la plata que dejen las cantidades fijas",
   "remove": "Quitar",
   "calculate": "Calcular",
   "recalculate": "Recalcular",
@@ -36,6 +38,7 @@
   "times": "{{count}} ×",
   "preview": "Vista previa de la página",
   "placedOf": "{{placed}} / {{quantity}}",
+  "placedFill": "{{placed}} (relleno)",
   "exclude": "Excluir del resultado",
   "stale": "Los ajustes cambiaron desde esta distribución. Pulsa Calcular para actualizarla."
 }
