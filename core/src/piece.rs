@@ -101,6 +101,19 @@ pub struct Piece {
     pub allow_mirror: bool,
 }
 
+impl Piece {
+    /// Options that, applied to the Piece's own cleaned image, give it back as it is: how a Piece
+    /// whose source was not kept (a split one) reopens for editing.
+    pub fn reopen_options(&self) -> PrepareOptions {
+        PrepareOptions {
+            size: Some(RealSize::Width(self.size_mm[0])),
+            allow_rotation: self.allow_rotation,
+            allow_mirror: self.allow_mirror,
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum PrepareError {
     Image(image::ImageError),

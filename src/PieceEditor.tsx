@@ -9,6 +9,7 @@ import {
   type PrepareOptions,
   previewPiece,
   splitToLibrary,
+  updatePiece,
 } from "./library";
 
 type Side = "width" | "height";
@@ -21,26 +22,36 @@ interface Props {
   image: Uint8Array<ArrayBuffer>;
   /** MIME type of `image`, so the browser can show it (SVGs need it). */
   type: string;
+  /** A Library piece reopened with its saved settings; saving then overwrites it in place. */
+  saved?: { id: string; options: PrepareOptions; edits?: Edits };
   onClose: () => void;
   /** One piece, or one per Part when split. */
-  onAdded: (pieces: PieceView[]) => void;
+  onSaved: (pieces: PieceView[]) => void;
 }
 
-export default function PieceEditor({ image, type, onClose, onAdded }: Props) {
+export default function PieceEditor({ image, type, saved, onClose, onSaved }: Props) {
   const { t } = useTranslation("library");
-  const [tolerance, setTolerance] = useState(32);
+  const [tolerance, setTolerance] = useState(saved?.options.tolerance ?? 32);
   // The side the jeweller typed; the other one follows the proportions. Until then, `core` takes
   // the size from the file's DPI.
-  const [size, setSize] = useState<{ side: Side; text: string }>();
-  const [allowRotation, setAllowRotation] = useState(true);
-  const [allowMirror, setAllowMirror] = useState(false);
+  const [size, setSize] = useState<{ side: Side; text: string } | undefined>(() => {
+    const realSize = saved?.options.size;
+    if (!realSize) return undefined;
+    // Shown like the computed side; a split piece's width is a long fraction.
+    const text = (mm: number) => String(Number(mm.toFixed(2)));
+    return "width" in realSize
+      ? { side: "width", text: text(realSize.width) }
+      : { side: "height", text: text(realSize.height) };
+  });
+  const [allowRotation, setAllowRotation] = useState(saved?.options.allowRotation ?? true);
+  const [allowMirror, setAllowMirror] = useState(saved?.options.allowMirror ?? false);
   const [preview, setPreview] = useState<PieceView>();
   const [error, setError] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [sourceUrl, setSourceUrl] = useState<string>();
   const [tool, setTool] = useState<Tool>();
   const [brushSize, setBrushSize] = useState(20);
-  const [edits, setEdits] = useState<Edits>();
+  const [edits, setEdits] = useState(saved?.edits);
   // Painted in source pixels; it outlives tolerance and size changes for the whole session.
   const canvas = useRef<HTMLCanvasElement>(null);
   const lastPoint = useRef<DOMPoint>(undefined);
@@ -61,6 +72,21 @@ export default function PieceEditor({ image, type, onClose, onAdded }: Props) {
   }, [tolerance, side, mm, allowRotation, allowMirror]);
   // Decoded by `core` (SVGs rasterised), so the overlay and the edits share its pixel grid.
   const [sourceW, sourceH] = preview?.sourcePx ?? [];
+
+  // Saved strokes go onto the canvas once it exists, so they stay editable. No painting until
+  // then, or the first stroke's export would drop them.
+  const savedEdits = useRef(saved?.edits);
+  useEffect(() => {
+    const ctx = canvas.current?.getContext("2d");
+    const png = savedEdits.current;
+    if (!ctx || !png) return;
+    void createImageBitmap(new Blob([png], { type: "image/png" })).then((bitmap) => {
+      if (!savedEdits.current) return;
+      ctx.drawImage(bitmap, 0, 0);
+      savedEdits.current = undefined;
+      painted.current = true;
+    });
+  }, [sourceW]);
 
   // Re-prepare live, debounced so dragging the slider doesn't queue up a run per step.
   useEffect(() => {
@@ -86,7 +112,8 @@ export default function PieceEditor({ image, type, onClose, onAdded }: Props) {
 
   const exportEdits = () =>
     new Promise<Edits | undefined>((resolve) => {
-      if (!painted.current || !canvas.current) return resolve(undefined);
+      // Until saved strokes are on the canvas, they are still the edits.
+      if (!painted.current || !canvas.current) return resolve(edits);
       canvas.current.toBlob((png) =>
         png
           ? png.arrayBuffer().then((buffer) => resolve(new Uint8Array(buffer)))
@@ -102,9 +129,12 @@ export default function PieceEditor({ image, type, onClose, onAdded }: Props) {
       .then((edits) =>
         split
           ? splitToLibrary(image, options, edits)
-          : addToLibrary(image, options, edits).then((piece) => [piece]),
+          : (saved
+              ? updatePiece(saved.id, image, type, options, edits)
+              : addToLibrary(image, type, options, edits)
+            ).then((piece) => [piece]),
       )
-      .then(onAdded, (e) => {
+      .then(onSaved, (e) => {
         setError(String(e));
         setSaving(false);
       });
@@ -114,7 +144,7 @@ export default function PieceEditor({ image, type, onClose, onAdded }: Props) {
   const paint = (e: PointerEvent<SVGSVGElement>, from?: DOMPoint) => {
     const ctx = canvas.current?.getContext("2d");
     const toSource = e.currentTarget.getScreenCTM()?.inverse();
-    if (!tool || !ctx || !toSource) return;
+    if (!tool || !ctx || !toSource || savedEdits.current) return;
     const point = new DOMPoint(e.clientX, e.clientY).matrixTransform(toSource);
     const width = brushSize * toSource.a;
     ctx.strokeStyle = ctx.fillStyle = TOOL_COLOR[tool];
@@ -320,7 +350,7 @@ export default function PieceEditor({ image, type, onClose, onAdded }: Props) {
               {t("cancel")}
             </Dialog.Close>
             {/* Only on request: a motif's detached parts usually belong together. */}
-            {preview && preview.contours.length > 1 && (
+            {!saved && preview && preview.contours.length > 1 && (
               <button
                 type="button"
                 disabled={!options || !!error || saving}
@@ -336,7 +366,7 @@ export default function PieceEditor({ image, type, onClose, onAdded }: Props) {
               onClick={() => accept(false)}
               className="rounded-md bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-40"
             >
-              {t("accept")}
+              {t(saved ? "save" : "accept")}
             </button>
           </div>
         </Dialog.Content>

@@ -23,5 +23,12 @@
   "cancel": "Cancel",
   "accept": "Add to Library",
   "split": "Split into {{count}} pieces",
-  "loadFailed": "Could not load the Library: {{error}}"
+  "loadFailed": "Could not load the Library: {{error}}",
+  "edit": "Double-click to edit",
+  "save": "Save changes",
+  "delete": "Delete",
+  "deleteTitle": "Delete this piece?",
+  "deleteDescription": "It is removed from the Library and from disk. This cannot be undone.",
+  "openFailed": "Could not open this piece: {{error}}",
+  "deleteFailed": "Could not delete this piece: {{error}}"
 }

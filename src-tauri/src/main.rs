@@ -1,9 +1,9 @@
 // Prevents an additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use argentajo_core::piece::{Piece, PrepareError, PrepareOptions, prepare_piece, split_piece};
+use argentajo_core::piece::{Piece, PrepareOptions, prepare_piece, split_piece};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,18 +35,14 @@ impl PieceView {
 /// Raw image bytes as the body, `PrepareOptions` as JSON in the `options` header,
 /// so the slider can re-prepare without serialising the image as a JSON array.
 /// Manual edits, if any, are appended to the body; `edits-length` says how many bytes they take.
-fn prepare<T>(
-    request: &Request,
-    run: fn(&[u8], &PrepareOptions) -> Result<T, PrepareError>,
-) -> Result<T, String> {
+fn parse<'a>(request: &'a Request<'_>) -> Result<(&'a [u8], PrepareOptions), String> {
     let InvokeBody::Raw(bytes) = request.body() else {
         return Err("expected the image bytes as the request body".into());
     };
-    let header = |name| request.headers().get(name).map(|v| v.as_bytes());
     let mut options: PrepareOptions =
-        serde_json::from_slice(header("options").ok_or("missing options header")?)
+        serde_json::from_slice(header(request, "options").ok_or("missing options header")?)
             .map_err(|e| e.to_string())?;
-    let edits_length = match header("edits-length") {
+    let edits_length = match header(request, "edits-length") {
         Some(length) => std::str::from_utf8(length)
             .ok()
             .and_then(|length| length.parse().ok())
@@ -56,13 +52,28 @@ fn prepare<T>(
     };
     let (image, edits) = bytes.split_at(bytes.len() - edits_length);
     options.edits = (edits_length > 0).then(|| edits.to_vec());
-    run(image, &options).map_err(|e| e.to_string())
+    Ok((image, options))
+}
+
+fn header<'a>(request: &'a Request<'_>, name: &str) -> Option<&'a [u8]> {
+    request.headers().get(name).map(|v| v.as_bytes())
+}
+
+/// A header holding text, such as the image's MIME type in `type` or the piece's `id`.
+fn text_header<'a>(request: &'a Request<'_>, name: &str) -> Result<&'a str, String> {
+    header(request, name)
+        .and_then(|v| std::str::from_utf8(v).ok())
+        .ok_or_else(|| format!("missing {name} header"))
 }
 
 // `async`: sync commands run on the main thread and would freeze the window while preparing.
 #[tauri::command(async)]
 fn preview_piece(request: Request) -> Result<PieceView, String> {
-    Ok(PieceView::new(None, prepare(&request, prepare_piece)?))
+    let (image, options) = parse(&request)?;
+    Ok(PieceView::new(
+        None,
+        prepare_piece(image, &options).map_err(|e| e.to_string())?,
+    ))
 }
 
 fn library_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -73,12 +84,20 @@ fn library_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .join("library"))
 }
 
-/// Library layout: one folder per Piece holding `piece.png` and `piece.json`.
-fn save(app: &tauri::AppHandle, piece: Piece) -> Result<PieceView, String> {
+/// The folder of the Library piece `id`. Ids are timestamps: anything else could escape the Library.
+fn piece_dir(app: &tauri::AppHandle, id: &str) -> Result<PathBuf, String> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("invalid piece id: {id}"));
+    }
+    Ok(library_dir(app)?.join(id))
+}
+
+/// A new, empty piece folder named by a fresh id.
+fn new_piece_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let library = library_dir(app)?;
     fs::create_dir_all(&library).map_err(|e| e.to_string())?;
     // A split saves several in a row: on a coarse clock the next id may still be taken.
-    let (id, dir) = loop {
+    loop {
         let id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -86,32 +105,117 @@ fn save(app: &tauri::AppHandle, piece: Piece) -> Result<PieceView, String> {
             .to_string();
         let dir = library.join(&id);
         match fs::create_dir(&dir) {
-            Ok(()) => break (id, dir),
+            Ok(()) => return Ok(dir),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e.to_string()),
         }
-    };
-    fs::write(dir.join("piece.png"), &piece.png).map_err(|e| e.to_string())?;
-    fs::write(
-        dir.join("piece.json"),
-        serde_json::to_vec_pretty(&piece).unwrap(),
-    )
-    .map_err(|e| e.to_string())?;
+    }
+}
+
+/// How the editor reopens a Piece: the image it was prepared from, its MIME type and its options.
+#[derive(Serialize, Deserialize)]
+struct Source {
+    #[serde(rename = "type")]
+    mime: String,
+    options: PrepareOptions,
+}
+
+/// Library layout: one folder per Piece holding `piece.png` and `piece.json`, plus what the editor
+/// reopens it from: `source` with `source.json`, and `edits.png` when it was brushed. Without them
+/// (split pieces) it reopens from `piece.png`.
+fn save(dir: PathBuf, piece: Piece, source: Option<(&[u8], Source)>) -> Result<PieceView, String> {
+    let write =
+        |name: &str, bytes: &[u8]| fs::write(dir.join(name), bytes).map_err(|e| e.to_string());
+    write("piece.png", &piece.png)?;
+    write("piece.json", &serde_json::to_vec_pretty(&piece).unwrap())?;
+    if let Some((image, source)) = source {
+        write("source", image)?;
+        write("source.json", &serde_json::to_vec_pretty(&source).unwrap())?;
+        match &source.options.edits {
+            Some(edits) => write("edits.png", edits)?,
+            None => _ = fs::remove_file(dir.join("edits.png")),
+        }
+    }
+    let id = dir.file_name().unwrap().to_string_lossy().into_owned();
     Ok(PieceView::new(Some(id), piece))
+}
+
+/// Prepares the request's image and saves it, with its source, into `dir`.
+fn prepare_into(dir: PathBuf, request: &Request) -> Result<PieceView, String> {
+    let (image, options) = parse(request)?;
+    let piece = prepare_piece(image, &options).map_err(|e| e.to_string())?;
+    let mime = text_header(request, "type")?.to_owned();
+    save(dir, piece, Some((image, Source { mime, options })))
 }
 
 #[tauri::command(async)]
 fn add_to_library(app: tauri::AppHandle, request: Request) -> Result<PieceView, String> {
-    save(&app, prepare(&request, prepare_piece)?)
+    prepare_into(new_piece_dir(&app)?, &request)
+}
+
+/// Re-prepares the Library piece in the `id` header and overwrites it in place.
+#[tauri::command(async)]
+fn update_piece(app: tauri::AppHandle, request: Request) -> Result<PieceView, String> {
+    let dir = piece_dir(&app, text_header(&request, "id")?)?;
+    if !dir.is_dir() {
+        return Err("this piece is no longer in the Library".into());
+    }
+    prepare_into(dir, &request)
 }
 
 /// Splits the image into one Piece per Part and adds them all.
 #[tauri::command(async)]
 fn split_to_library(app: tauri::AppHandle, request: Request) -> Result<Vec<PieceView>, String> {
-    prepare(&request, split_piece)?
+    let (image, options) = parse(&request)?;
+    split_piece(image, &options)
+        .map_err(|e| e.to_string())?
         .into_iter()
-        .map(|piece| save(&app, piece))
+        .map(|piece| save(new_piece_dir(&app)?, piece, None))
         .collect()
+}
+
+/// A Library piece as the editor reopens it; images and edits in base64.
+#[derive(Serialize)]
+struct OpenedPiece {
+    #[serde(flatten)]
+    source: Source,
+    image: String,
+    edits: Option<String>,
+}
+
+#[tauri::command(async)]
+fn open_piece(app: tauri::AppHandle, id: String) -> Result<OpenedPiece, String> {
+    let dir = piece_dir(&app, &id)?;
+    let read = |name: &str| fs::read(dir.join(name)).map_err(|e| e.to_string());
+    let (image, source) = match fs::read(dir.join("source.json")) {
+        Ok(json) => (
+            read("source")?,
+            serde_json::from_slice(&json).map_err(|e| e.to_string())?,
+        ),
+        // A split piece reopens from its own cleaned image.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let piece: Piece =
+                serde_json::from_slice(&read("piece.json")?).map_err(|e| e.to_string())?;
+            let source = Source {
+                mime: "image/png".into(),
+                options: piece.reopen_options(),
+            };
+            (read("piece.png")?, source)
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    Ok(OpenedPiece {
+        source,
+        image: STANDARD.encode(image),
+        edits: fs::read(dir.join("edits.png"))
+            .ok()
+            .map(|e| STANDARD.encode(e)),
+    })
+}
+
+#[tauri::command(async)]
+fn delete_piece(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    fs::remove_dir_all(piece_dir(&app, &id)?).map_err(|e| e.to_string())
 }
 
 /// Every Piece in the Library, oldest first. Unreadable folders are skipped.
@@ -150,7 +254,10 @@ fn main() {
             core_version,
             preview_piece,
             add_to_library,
+            update_piece,
             split_to_library,
+            open_piece,
+            delete_piece,
             list_library
         ])
         .run(tauri::generate_context!())

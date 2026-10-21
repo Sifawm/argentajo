@@ -535,3 +535,24 @@ fn a_split_piece_keeps_only_its_own_part_in_the_image() {
         "the dot is not in the ring's image"
     );
 }
+
+#[test]
+fn a_split_piece_reopens_from_its_cleaned_image_at_its_real_size() {
+    // What the Library reopens a split piece from: its own cleaned image, no longer the whole source.
+    let options = PrepareOptions {
+        allow_rotation: false,
+        allow_mirror: true,
+        ..width(17.0)
+    };
+    for piece in split_piece(&fixture("two_parts.png"), &options).unwrap() {
+        let reopened = prepare_piece(&piece.png, &piece.reopen_options()).unwrap();
+        assert_eq!(reopened.size_px, piece.size_px);
+        assert_eq!(reopened.size_mm, piece.size_mm);
+        assert_eq!(reopened.contours, piece.contours);
+        assert_eq!(reopened.png, piece.png);
+        assert_eq!(
+            (reopened.allow_rotation, reopened.allow_mirror),
+            (false, true)
+        );
+    }
+}
