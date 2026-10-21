@@ -103,13 +103,16 @@ export default function PieceEditor({ image, onClose, onAdded }: Props) {
                     width={preview.sizeMm[0]}
                     height={preview.sizeMm[1]}
                   />
-                  <polygon
-                    points={preview.contour.map(([x, y]) => `${x},${y}`).join(" ")}
-                    fill="none"
-                    stroke="#0ea5e9"
-                    strokeWidth={2}
-                    vectorEffect="non-scaling-stroke"
-                  />
+                  {preview.contours.map((contour, i) => (
+                    <polygon
+                      key={i}
+                      points={contour.map(([x, y]) => `${x},${y}`).join(" ")}
+                      fill="none"
+                      stroke="#0ea5e9"
+                      strokeWidth={2}
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ))}
                 </svg>
               )}
             </div>

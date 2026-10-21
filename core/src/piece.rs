@@ -1,13 +1,19 @@
-//! Piece preparation: image bytes → background mask → cleaned image, real size and nesting contour.
+//! Piece preparation: image bytes → background mask → cleaned image, real size and nesting contours.
 
 use image::{GenericImageView, GrayImage, ImageFormat, Luma, RgbaImage};
 use imageproc::contours::{BorderType, find_contours};
 use imageproc::geometry::{approximate_polygon_dp, contour_area};
+use imageproc::region_labelling::{Connectivity, connected_components};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
 /// Contour simplification tolerance; small next to the ~1 mm saw separation.
 const SIMPLIFY_MM: f64 = 0.05;
+
+/// Blobs smaller than this fraction of the largest one are specks (dust, shadows, noise) and are dropped.
+// ponytail: relative so it holds before the real size is known; ~1 mm² on a 30 mm motif. Tune here, or
+// fix single cases with the brush (#1, story 7).
+const SPECK_FRACTION: f64 = 0.002;
 
 /// The real size the jeweller sets: one side in mm, the other follows the proportions.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -48,8 +54,9 @@ pub struct Piece {
     pub png: Vec<u8>,
     pub size_px: [u32; 2],
     pub size_mm: [f64; 2],
-    /// Outer silhouette for nesting; interior holes are filled.
-    pub contour: Vec<[f64; 2]>,
+    /// One outer silhouette per Part, largest first; interior holes are filled. Parts are cut
+    /// separately but belong together: nesting places all of them or none.
+    pub contours: Vec<Vec<[f64; 2]>>,
     pub allow_rotation: bool,
     pub allow_mirror: bool,
 }
@@ -83,7 +90,8 @@ impl From<image::ImageError> for PrepareError {
 
 pub fn prepare_piece(bytes: &[u8], options: &PrepareOptions) -> Result<Piece, PrepareError> {
     let mut image = image::load_from_memory(bytes)?.to_rgba8();
-    let mask = mask(&image, options.tolerance);
+    let mut mask = mask(&image, options.tolerance);
+    drop_specks(&mut mask);
     let (x0, y0, w, h) = bounding_box(&mask).ok_or(PrepareError::Empty)?;
 
     for (pixel, mask_pixel) in image.pixels_mut().zip(mask.pixels()) {
@@ -104,7 +112,7 @@ pub fn prepare_piece(bytes: &[u8], options: &PrepareOptions) -> Result<Piece, Pr
         png,
         size_px: [w, h],
         size_mm,
-        contour: contour(&mask.view(x0, y0, w, h).to_image(), mm_per_px),
+        contours: contours(&mask.view(x0, y0, w, h).to_image(), mm_per_px),
         allow_rotation: options.allow_rotation,
         allow_mirror: options.allow_mirror,
     })
@@ -125,28 +133,54 @@ fn mask(image: &RgbaImage, tolerance: u8) -> GrayImage {
     })
 }
 
-/// The largest outer border of the mask, simplified, in mm. Following only outer borders fills the holes.
-// ponytail: detached parts and specks outside the largest blob are left out of the contour; covering them
-// belongs with "split" (#1, stories 8–9).
-fn contour(mask: &GrayImage, mm_per_px: f64) -> Vec<[f64; 2]> {
+/// Clears every blob smaller than `SPECK_FRACTION` of the largest one.
+fn drop_specks(mask: &mut GrayImage) {
+    let labels = connected_components(&*mask, Connectivity::Eight, Luma([0u8]));
+    let mut sizes = vec![
+        0u32;
+        labels
+            .pixels()
+            .map(|l| l[0] as usize + 1)
+            .max()
+            .unwrap_or(1)
+    ];
+    for label in labels.pixels().filter(|l| l[0] > 0) {
+        sizes[label[0] as usize] += 1;
+    }
+    let min = SPECK_FRACTION * sizes[1..].iter().copied().max().unwrap_or(0) as f64;
+    for (pixel, label) in mask.pixels_mut().zip(labels.pixels()) {
+        if (sizes[label[0] as usize] as f64) < min {
+            pixel[0] = 0;
+        }
+    }
+}
+
+/// Each blob's outer border, simplified, in mm, largest first. Following only outer borders fills the holes.
+fn contours(mask: &GrayImage, mm_per_px: f64) -> Vec<Vec<[f64; 2]>> {
     // A 1 px background frame, so a motif touching the edge still has an outer border.
     let mut framed = GrayImage::new(mask.width() + 2, mask.height() + 2);
     image::imageops::replace(&mut framed, mask, 1, 1);
-    let outer = find_contours::<i32>(&framed)
+    let mut outers: Vec<_> = find_contours::<i32>(&framed)
         .into_iter()
         .filter(|c| c.border_type == BorderType::Outer)
-        .max_by(|a, b| contour_area(&a.points).total_cmp(&contour_area(&b.points)))
-        .expect("a non-empty mask has an outer border");
-    approximate_polygon_dp(&outer.points, SIMPLIFY_MM / mm_per_px, true)
+        .map(|c| c.points)
+        .collect();
+    outers.sort_by(|a, b| contour_area(b).total_cmp(&contour_area(a)));
+    outers
         .iter()
-        // Border pixel centres, back in unframed coordinates.
-        // ponytail: ~0.5 px inside the true edge; negligible at print resolution, which the low-res
-        // warning (#1, story 13) enforces.
-        .map(|p| {
-            [
-                (p.x as f64 - 0.5) * mm_per_px,
-                (p.y as f64 - 0.5) * mm_per_px,
-            ]
+        .map(|outer| {
+            approximate_polygon_dp(outer, SIMPLIFY_MM / mm_per_px, true)
+                .iter()
+                // Border pixel centres, back in unframed coordinates.
+                // ponytail: ~0.5 px inside the true edge; negligible at print resolution, which the
+                // low-res warning (#1, story 13) enforces.
+                .map(|p| {
+                    [
+                        (p.x as f64 - 0.5) * mm_per_px,
+                        (p.y as f64 - 0.5) * mm_per_px,
+                    ]
+                })
+                .collect()
         })
         .collect()
 }

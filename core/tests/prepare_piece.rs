@@ -3,6 +3,8 @@
 //!   distance 50 around (200,150), so its bounding box is 180 × 166.6 px.
 //! - `transparent.png`: 200×200 px, transparent; a white disc inside a dark ring of outer r=64 at the centre.
 //! - `ring.png`: 200×200 px, white; a blue ring, outer r=80 and inner r=35, at the centre.
+//! - `flower_with_speck.png`: the flower plus a 3×3 px dark speck at (11..13, 11..13).
+//! - `two_parts.png`: 220×120 px, white; separate discs r=40 at (60,60) and r=20 at (170,60).
 
 use argentajo_core::piece::{Piece, PrepareError, PrepareOptions, RealSize, prepare_piece};
 
@@ -23,6 +25,12 @@ fn alpha_at(piece: &Piece, x: u32, y: u32) -> u8 {
         .unwrap()
         .to_rgba8()
         .get_pixel(x, y)[3]
+}
+
+/// The contour of a single-part piece.
+fn only_contour(piece: &Piece) -> &[[f64; 2]] {
+    assert_eq!(piece.contours.len(), 1, "expected a single part");
+    &piece.contours[0]
 }
 
 fn polygon_area(polygon: &[[f64; 2]]) -> f64 {
@@ -99,7 +107,7 @@ fn the_contour_encloses_the_motif_in_mm() {
 
     let inside = opaque
         .iter()
-        .filter(|&&p| contains(&piece.contour, p))
+        .filter(|&&p| contains(only_contour(&piece), p))
         .count();
     assert!(
         inside as f64 >= 0.98 * opaque.len() as f64,
@@ -107,7 +115,11 @@ fn the_contour_encloses_the_motif_in_mm() {
         opaque.len()
     );
     let motif_area = opaque.len() as f64 * mm_per_px * mm_per_px;
-    assert_near(polygon_area(&piece.contour), motif_area, 0.03 * motif_area);
+    assert_near(
+        polygon_area(only_contour(&piece)),
+        motif_area,
+        0.03 * motif_area,
+    );
 }
 
 #[test]
@@ -122,11 +134,11 @@ fn interior_holes_are_filled_in_the_contour_but_stay_visible_in_the_image() {
         "the hole is transparent in the cleaned image"
     );
     assert!(
-        contains(&piece.contour, [8.0, 8.0]),
+        contains(only_contour(&piece), [8.0, 8.0]),
         "the hole is inside the contour"
     );
     assert_near(
-        polygon_area(&piece.contour),
+        polygon_area(only_contour(&piece)),
         std::f64::consts::PI * 8.0 * 8.0,
         3.0,
     );
@@ -151,7 +163,7 @@ fn existing_transparency_is_the_mask_even_for_white_motifs() {
         "the white disc is part of the motif"
     );
     assert_near(
-        polygon_area(&piece.contour),
+        polygon_area(only_contour(&piece)),
         std::f64::consts::PI * 6.4 * 6.4,
         2.0,
     );
@@ -211,4 +223,37 @@ fn an_image_removed_entirely_is_an_error() {
         prepare_piece(&std::fs::read(path).unwrap(), &options),
         Err(PrepareError::Empty)
     ));
+}
+
+#[test]
+fn specks_are_dropped_and_do_not_stretch_the_real_size() {
+    let piece = prepare("flower_with_speck.png", width(30.0));
+
+    assert_near(piece.size_px[0] as f64, 180.0, 2.0);
+    assert_near(piece.size_px[1] as f64, 166.6, 2.0);
+    only_contour(&piece);
+}
+
+#[test]
+fn separate_parts_each_keep_their_own_contour() {
+    // Discs r=40 and r=20 spanning x 20..190 → 170 px wide; at 17 mm that is 0.1 mm/px.
+    let piece = prepare("two_parts.png", width(17.0));
+    let [big, small] = &piece.contours[..] else {
+        panic!("expected two parts, got {}", piece.contours.len())
+    };
+
+    assert!(
+        contains(big, [4.0, 4.0]),
+        "the big disc (centre 40,40 px) is enclosed"
+    );
+    assert_near(polygon_area(big), std::f64::consts::PI * 4.0 * 4.0, 1.5);
+    assert!(
+        contains(small, [15.0, 4.0]),
+        "the small disc (centre 150,40 px) is enclosed"
+    );
+    assert_near(polygon_area(small), std::f64::consts::PI * 2.0 * 2.0, 0.6);
+    assert!(
+        !contains(big, [10.0, 4.0]) && !contains(small, [10.0, 4.0]),
+        "the gap between them stays free"
+    );
 }

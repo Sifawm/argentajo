@@ -14,8 +14,8 @@ export interface PieceView {
   image: string;
   sizePx: [number, number];
   sizeMm: [number, number];
-  /** Outer silhouette in mm, origin top-left, y down. */
-  contour: [number, number][];
+  /** One outer silhouette per Part, in mm, origin top-left, y down. */
+  contours: [number, number][][];
   allowRotation: boolean;
   allowMirror: boolean;
 }
