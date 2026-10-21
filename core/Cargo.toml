@@ -5,7 +5,13 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow = "1"
+base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 imageproc = { version = "0.27", default-features = false }
+# At the version sparrow pins (sparrow is not on crates.io).
+jagua-rs = { version = "=1.1.0", features = ["spp"] }
+rand = "0.10"
 resvg = "0.48"
 serde = { version = "1", features = ["derive"] }
+sparrow = { git = "https://github.com/JeroenGar/sparrow", rev = "1fe3e3146110c34d77510636defb737c7ce893c6" }

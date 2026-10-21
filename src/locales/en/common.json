@@ -1,5 +1,10 @@
 {
   "tagline": "Contour nesting of jewellery templates on silver sheets",
   "coreVersion": "Core version: {{version}}",
-  "language": "Language"
+  "language": "Language",
+  "views": {
+    "label": "Views",
+    "library": "Library",
+    "job": "Job"
+  }
 }

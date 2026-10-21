@@ -1,15 +1,28 @@
 import { ImagePlus, Trash2 } from "lucide-react";
 import { AlertDialog } from "radix-ui";
-import { type ComponentProps, type DragEvent, useEffect, useRef, useState } from "react";
+import {
+  type ComponentProps,
+  type Dispatch,
+  type DragEvent,
+  type SetStateAction,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import PieceEditor from "./PieceEditor";
 import { deletePiece, listLibrary, openPiece, type PieceView } from "./library";
 
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/svg+xml"];
 
-export default function LibraryView() {
+interface Props {
+  /** Shared with the Job view. */
+  pieces: PieceView[];
+  setPieces: Dispatch<SetStateAction<PieceView[]>>;
+}
+
+export default function LibraryView({ pieces, setPieces }: Props) {
   const { t } = useTranslation("library");
-  const [pieces, setPieces] = useState<PieceView[]>([]);
   const [error, setError] = useState<string>();
   const [editing, setEditing] =
     useState<Pick<ComponentProps<typeof PieceEditor>, "image" | "type" | "saved">>();

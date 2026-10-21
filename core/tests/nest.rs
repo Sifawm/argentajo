@@ -1,0 +1,361 @@
+//! Nesting properties, on synthetic pieces with exact contours. Nesting is stochastic, so these
+//! assert invariants (no overlap, containment, separation, flags, all-or-nothing Parts, the missing
+//! report, utilisation) over fixed seeds rather than coordinates.
+
+use argentajo_core::nest::{Job, JobItem, Layout, Paper, Placement, nest, render_page};
+use argentajo_core::piece::{Piece, PrepareOptions, RealSize, prepare_piece};
+use std::time::Duration;
+
+const SEEDS: [u64; 2] = [1, 2];
+const TIME_LIMIT: Duration = Duration::from_secs(2);
+/// jagua-rs rounds its separation offsets with 0.1 rad chords and works in f32.
+const TOLERANCE: f64 = 0.01;
+
+const A4: Paper = Paper {
+    size_mm: [210.0, 297.0],
+    margin_mm: 5.0,
+};
+
+fn rect(w: f64, h: f64) -> Vec<[f64; 2]> {
+    vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]]
+}
+
+/// An asymmetric L: any rotation or mirroring shows.
+fn ell() -> Vec<[f64; 2]> {
+    vec![
+        [0.0, 0.0],
+        [6.0, 0.0],
+        [6.0, 14.0],
+        [16.0, 14.0],
+        [16.0, 20.0],
+        [0.0, 20.0],
+    ]
+}
+
+fn triangle() -> Vec<[f64; 2]> {
+    vec![[0.0, 0.0], [18.0, 0.0], [0.0, 9.0]]
+}
+
+fn piece(contours: Vec<Vec<[f64; 2]>>, allow_rotation: bool, allow_mirror: bool) -> Piece {
+    let (w, h) = contours
+        .iter()
+        .flatten()
+        .fold((0.0f64, 0.0f64), |(w, h), &[x, y]| (w.max(x), h.max(y)));
+    Piece {
+        png: vec![],
+        size_px: [w as u32 * 10, h as u32 * 10],
+        offset_px: [0, 0],
+        source_px: [w as u32 * 10, h as u32 * 10],
+        size_mm: [w, h],
+        ppi: 254.0,
+        low_resolution: false,
+        contours,
+        allow_rotation,
+        allow_mirror,
+    }
+}
+
+fn job(sheet_mm: [f64; 2], items: Vec<(Piece, u32)>) -> Job {
+    Job {
+        paper: A4,
+        sheet_mm,
+        separation_mm: 1.0,
+        edge_margin_mm: 1.5,
+        items: items
+            .into_iter()
+            .map(|(piece, quantity)| JobItem { piece, quantity })
+            .collect(),
+    }
+}
+
+/// The placed Part's contour, in Sheet mm.
+fn placed(job: &Job, p: &Placement) -> Vec<[f64; 2]> {
+    let [a, b, c, d, e, f] = p.transform;
+    job.items[p.item].piece.contours[p.part]
+        .iter()
+        .map(|&[x, y]| [a * x + c * y + e, b * x + d * y + f])
+        .collect()
+}
+
+fn polygon_area(polygon: &[[f64; 2]]) -> f64 {
+    let n = polygon.len();
+    (0..n)
+        .map(|i| polygon[i][0] * polygon[(i + 1) % n][1] - polygon[(i + 1) % n][0] * polygon[i][1])
+        .sum::<f64>()
+        .abs()
+        / 2.0
+}
+
+fn contains(polygon: &[[f64; 2]], [x, y]: [f64; 2]) -> bool {
+    let n = polygon.len();
+    (0..n)
+        .filter(|&i| {
+            let ([xi, yi], [xj, yj]) = (polygon[i], polygon[(i + n - 1) % n]);
+            (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi
+        })
+        .count()
+        % 2
+        == 1
+}
+
+fn edges(polygon: &[[f64; 2]]) -> impl Iterator<Item = ([f64; 2], [f64; 2])> + '_ {
+    (0..polygon.len()).map(|i| (polygon[i], polygon[(i + 1) % polygon.len()]))
+}
+
+/// Positive when `r` is left of `p → q`.
+fn cross(p: [f64; 2], q: [f64; 2], r: [f64; 2]) -> f64 {
+    (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+}
+
+fn point_segment_distance(p: [f64; 2], (a, b): ([f64; 2], [f64; 2])) -> f64 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+    (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy)
+}
+
+fn segment_distance(s: ([f64; 2], [f64; 2]), t: ([f64; 2], [f64; 2])) -> f64 {
+    let crosses = cross(s.0, s.1, t.0) * cross(s.0, s.1, t.1) < 0.0
+        && cross(t.0, t.1, s.0) * cross(t.0, t.1, s.1) < 0.0;
+    if crosses {
+        return 0.0;
+    }
+    [
+        point_segment_distance(s.0, t),
+        point_segment_distance(s.1, t),
+        point_segment_distance(t.0, s),
+        point_segment_distance(t.1, s),
+    ]
+    .into_iter()
+    .fold(f64::INFINITY, f64::min)
+}
+
+/// 0 when they overlap.
+fn distance(a: &[[f64; 2]], b: &[[f64; 2]]) -> f64 {
+    if a.iter().any(|&p| contains(b, p)) || b.iter().any(|&p| contains(a, p)) {
+        return 0.0;
+    }
+    edges(a)
+        .flat_map(|s| edges(b).map(move |t| segment_distance(s, t)))
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Every invariant a Layout must hold, whatever the seed.
+fn assert_valid(job: &Job, layout: &Layout) {
+    let [w, h] = job.sheet_mm;
+    let m = job.edge_margin_mm - TOLERANCE;
+    let polygons: Vec<_> = layout.placements.iter().map(|p| placed(job, p)).collect();
+
+    for (p, polygon) in layout.placements.iter().zip(&polygons) {
+        assert!(
+            polygon
+                .iter()
+                .all(|&[x, y]| x >= m && x <= w - m && y >= m && y <= h - m),
+            "{p:?} is not inside the sheet minus the edge margin"
+        );
+        let [a, b, c, d, ..] = p.transform;
+        let piece = &job.items[p.item].piece;
+        if !piece.allow_rotation {
+            // Only a left-right flip, if any, keeps it upright.
+            assert!(
+                b.abs() < 1e-6 && c.abs() < 1e-6 && (d - 1.0).abs() < 1e-6,
+                "{p:?} rotated"
+            );
+            assert!((a.abs() - 1.0).abs() < 1e-6, "{p:?} scaled");
+        }
+        if !piece.allow_mirror {
+            assert!(a * d - b * c > 0.0, "{p:?} mirrored");
+        }
+    }
+
+    for i in 0..polygons.len() {
+        for j in i + 1..polygons.len() {
+            let gap = distance(&polygons[i], &polygons[j]);
+            assert!(
+                gap >= job.separation_mm - TOLERANCE,
+                "{:?} and {:?} are {gap} mm apart",
+                layout.placements[i],
+                layout.placements[j]
+            );
+        }
+    }
+
+    for (i, item) in job.items.iter().enumerate() {
+        assert_eq!(
+            layout.placed[i] + layout.missing[i],
+            item.quantity,
+            "item {i}: placed and missing make up the quantity"
+        );
+        for part in 0..item.piece.contours.len() {
+            let n = layout
+                .placements
+                .iter()
+                .filter(|p| p.item == i && p.part == part)
+                .count();
+            assert_eq!(
+                n, layout.placed[i] as usize,
+                "item {i}, part {part}: one per placed copy"
+            );
+        }
+    }
+
+    let area: f64 = polygons.iter().map(|p| polygon_area(p)).sum();
+    assert!(
+        (layout.utilisation - area / (w * h)).abs() < 1e-9,
+        "utilisation {} is not placed area / sheet area {}",
+        layout.utilisation,
+        area / (w * h)
+    );
+}
+
+fn nest_valid(job: &Job, seed: u64) -> Layout {
+    let layout = nest(job, seed, TIME_LIMIT).unwrap();
+    assert_valid(job, &layout);
+    layout
+}
+
+fn mixed_items() -> Vec<(Piece, u32)> {
+    vec![
+        (piece(vec![ell()], true, false), 5),
+        (piece(vec![triangle()], false, false), 4),
+        (piece(vec![ell()], false, true), 3),
+        (
+            piece(vec![rect(12.0, 12.0), rect(5.0, 5.0)], true, false),
+            3,
+        ),
+    ]
+}
+
+#[test]
+fn places_mixed_pieces_on_a_landscape_sheet() {
+    for seed in SEEDS {
+        let job = job([120.0, 70.0], mixed_items());
+        let layout = nest_valid(&job, seed);
+        assert_eq!(layout.missing, [0, 0, 0, 0], "seed {seed}: there is room");
+        assert_eq!(layout.placed, [5, 4, 3, 3]);
+    }
+}
+
+#[test]
+fn keeps_upright_pieces_upright_on_a_portrait_sheet() {
+    for seed in SEEDS {
+        let job = job([70.0, 120.0], mixed_items());
+        let layout = nest_valid(&job, seed);
+        assert_eq!(layout.missing, [0, 0, 0, 0], "seed {seed}: there is room");
+    }
+}
+
+#[test]
+fn compacts_towards_one_end_of_the_sheet() {
+    for (sheet, long_axis) in [([200.0, 50.0], 0), ([50.0, 200.0], 1)] {
+        let job = job(
+            sheet,
+            vec![(piece(vec![rect(10.0, 10.0)], false, false), 3)],
+        );
+        let layout = nest_valid(&job, 1);
+        let far = layout
+            .placements
+            .iter()
+            .flat_map(|p| placed(&job, p))
+            .map(|point| point[long_axis])
+            .fold(0.0, f64::max);
+        assert!(far < 50.0, "{sheet:?}: reaches {far} mm along the sheet");
+    }
+}
+
+#[test]
+fn copies_that_do_not_fit_are_missing() {
+    // 47 × 27 mm inside the edge margin: two rows of four 10 mm squares at 1 mm apart.
+    for seed in SEEDS {
+        let job = job(
+            [50.0, 30.0],
+            vec![(piece(vec![rect(10.0, 10.0)], false, false), 12)],
+        );
+        let layout = nest_valid(&job, seed);
+        assert!(layout.missing[0] >= 4, "seed {seed}: {:?}", layout.missing);
+        assert!(layout.placed[0] >= 6, "seed {seed}: {:?}", layout.placed);
+    }
+}
+
+#[test]
+fn a_piece_larger_than_the_sheet_is_missing() {
+    for seed in SEEDS {
+        let job = job(
+            [50.0, 30.0],
+            vec![
+                (piece(vec![rect(60.0, 40.0)], true, false), 2),
+                (piece(vec![rect(10.0, 10.0)], true, false), 2),
+            ],
+        );
+        let layout = nest_valid(&job, seed);
+        assert_eq!(layout.missing, [2, 0], "seed {seed}");
+    }
+}
+
+#[test]
+fn a_copy_is_placed_with_all_its_parts_or_missing() {
+    // Room for at most one 20 mm part; the 4 mm ones would fit many times over.
+    for seed in SEEDS {
+        let job = job(
+            [30.0, 30.0],
+            vec![(
+                piece(vec![rect(20.0, 20.0), rect(4.0, 4.0)], false, false),
+                3,
+            )],
+        );
+        let layout = nest_valid(&job, seed);
+        assert_eq!(layout.placed, [1], "seed {seed}");
+        assert_eq!(layout.missing, [2], "seed {seed}");
+    }
+}
+
+#[test]
+fn rejects_an_empty_sheet_or_negative_spacing() {
+    assert!(nest(&job([0.0, 50.0], vec![]), 1, TIME_LIMIT).is_err());
+    let mut negative = job([100.0, 50.0], vec![]);
+    negative.edge_margin_mm = -1.0;
+    assert!(nest(&negative, 1, TIME_LIMIT).is_err());
+}
+
+#[test]
+fn a_piece_that_only_just_fits_across_is_placed_or_missing() {
+    // 27 mm across inside the edge margin: 26.98 mm passes the pre-check with nothing to spare.
+    for seed in SEEDS {
+        let job = job(
+            [50.0, 30.0],
+            vec![(piece(vec![rect(26.98, 26.98)], false, false), 1)],
+        );
+        nest_valid(&job, seed);
+    }
+}
+
+#[test]
+fn rejects_a_sheet_larger_than_the_paper() {
+    let job = job([250.0, 100.0], vec![]);
+    assert!(nest(&job, 1, TIME_LIMIT).is_err());
+}
+
+#[test]
+fn renders_the_page_in_mm_with_every_placed_part() {
+    let ring = prepare_piece(
+        &std::fs::read(format!(
+            "{}/tests/fixtures/two_parts.png",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap(),
+        &PrepareOptions {
+            size: Some(RealSize::Width(30.0)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let job = job([100.0, 60.0], vec![(ring, 3)]);
+    let layout = nest_valid(&job, 1);
+    assert_eq!(layout.placements.len(), 6);
+
+    let svg = render_page(&job, &layout);
+    let tree = resvg::usvg::Tree::from_str(&svg, &Default::default()).unwrap();
+    let px_per_mm = 96.0 / 25.4;
+    assert!((tree.size().width() - 210.0 * px_per_mm).abs() < 0.01);
+    assert!((tree.size().height() - 297.0 * px_per_mm).abs() < 0.01);
+    assert_eq!(svg.matches("<use ").count(), 6, "one image per placed part");
+}

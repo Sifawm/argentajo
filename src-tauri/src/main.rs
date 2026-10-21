@@ -1,12 +1,13 @@
 // Prevents an additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use argentajo_core::nest::{Job, JobItem, Layout, Paper, nest, render_page};
 use argentajo_core::piece::{Piece, PrepareOptions, prepare_piece, split_piece};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 use tauri::ipc::{InvokeBody, Request};
 
@@ -218,6 +219,15 @@ fn delete_piece(app: tauri::AppHandle, id: String) -> Result<(), String> {
     fs::remove_dir_all(piece_dir(&app, &id)?).map_err(|e| e.to_string())
 }
 
+/// The Piece saved in a Library folder.
+fn read_piece(dir: &Path) -> Result<Piece, String> {
+    let read = |name: &str| fs::read(dir.join(name)).map_err(|e| e.to_string());
+    let mut piece: Piece =
+        serde_json::from_slice(&read("piece.json")?).map_err(|e| e.to_string())?;
+    piece.png = read("piece.png")?;
+    Ok(piece)
+}
+
 /// Every Piece in the Library, oldest first. Unreadable folders are skipped.
 #[tauri::command(async)]
 fn list_library(app: tauri::AppHandle) -> Result<Vec<PieceView>, String> {
@@ -227,18 +237,72 @@ fn list_library(app: tauri::AppHandle) -> Result<Vec<PieceView>, String> {
     let mut pieces: Vec<PieceView> = entries
         .flatten()
         .filter_map(|entry| {
-            let dir = entry.path();
-            let mut piece: Piece =
-                serde_json::from_slice(&fs::read(dir.join("piece.json")).ok()?).ok()?;
-            piece.png = fs::read(dir.join("piece.png")).ok()?;
             Some(PieceView::new(
                 Some(entry.file_name().to_string_lossy().into_owned()),
-                piece,
+                read_piece(&entry.path()).ok()?,
             ))
         })
         .collect();
     pieces.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(pieces)
+}
+
+// ponytail: fixed bound on a nesting run; becomes a per-Job setting with stop and live progress (#9).
+const NEST_TIME_LIMIT: Duration = Duration::from_secs(60);
+
+/// A Job as the frontend sends it: Library piece ids with their quantities.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JobRequest {
+    paper: Paper,
+    sheet_mm: [f64; 2],
+    separation_mm: f64,
+    edge_margin_mm: f64,
+    items: Vec<ItemRequest>,
+}
+
+#[derive(Deserialize)]
+struct ItemRequest {
+    id: String,
+    quantity: u32,
+}
+
+/// The Layout with its page rendered.
+#[derive(Serialize)]
+struct NestView {
+    svg: String,
+    #[serde(flatten)]
+    layout: Layout,
+}
+
+#[tauri::command(async)]
+fn nest_job(app: tauri::AppHandle, job: JobRequest) -> Result<NestView, String> {
+    let items = job
+        .items
+        .into_iter()
+        .map(|item| {
+            Ok(JobItem {
+                piece: read_piece(&piece_dir(&app, &item.id)?)?,
+                quantity: item.quantity,
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    let job = Job {
+        paper: job.paper,
+        sheet_mm: job.sheet_mm,
+        separation_mm: job.separation_mm,
+        edge_margin_mm: job.edge_margin_mm,
+        items,
+    };
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let layout = nest(&job, seed, NEST_TIME_LIMIT).map_err(|e| e.to_string())?;
+    Ok(NestView {
+        svg: render_page(&job, &layout),
+        layout,
+    })
 }
 
 fn main() {
@@ -258,7 +322,8 @@ fn main() {
             split_to_library,
             open_piece,
             delete_piece,
-            list_library
+            list_library,
+            nest_job
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
