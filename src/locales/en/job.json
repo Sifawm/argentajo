@@ -17,6 +17,7 @@
   "heightMm": "Height (mm)",
   "separation": "Separation (mm)",
   "edgeMargin": "Edge margin (mm)",
+  "timeLimit": "Maximum time (s)",
   "pieces": "Pieces",
   "dropHere": "Drag pieces here from the Library below.",
   "libraryHint": "Library: drag a piece into the list above, or click it to add one more.",
@@ -24,7 +25,8 @@
   "quantity": "Quantity",
   "remove": "Remove",
   "calculate": "Calculate",
-  "calculating": "Calculating…",
+  "recalculate": "Recalculate",
+  "stop": "Stop, this is good",
   "nestFailed": "Could not calculate the layout: {{error}}",
   "noResult": "Set up the job and press Calculate to see the layout.",
   "utilisation": "Silver used: {{value, number(style: percent; maximumFractionDigits: 1)}}",
@@ -34,5 +36,6 @@
   "times": "{{count}} ×",
   "preview": "Page preview",
   "placedOf": "{{placed}} / {{quantity}}",
+  "exclude": "Exclude from the result",
   "stale": "Settings changed since this layout. Press Calculate to update it."
 }

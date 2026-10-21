@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 /** Paper presets, portrait, in mm. */
 export const PAPERS = {
@@ -15,6 +15,8 @@ export interface JobRequest {
   sheetMm: [number, number];
   separationMm: number;
   edgeMarginMm: number;
+  /** Bound on the nesting run, in seconds. */
+  timeLimitS: number;
   /** Library piece ids with their quantities. */
   items: { id: string; quantity: number }[];
 }
@@ -30,4 +32,12 @@ export interface NestView {
   utilisation: number;
 }
 
-export const nestJob = (job: JobRequest) => invoke<NestView>("nest_job", { job });
+/** Resolves with the best Layout once the run ends; `onProgress` gets every improved one before. */
+export const nestJob = (job: JobRequest, onProgress: (view: NestView) => void) => {
+  const channel = new Channel<NestView>();
+  channel.onmessage = onProgress;
+  return invoke<NestView>("nest_job", { job, onProgress: channel });
+};
+
+/** Ends the run in progress: `nestJob` then resolves with the best Layout so far. */
+export const stopNesting = () => invoke("stop_nesting");

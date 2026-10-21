@@ -4,7 +4,8 @@
 
 use argentajo_core::nest::{Job, JobItem, Layout, Paper, Placement, nest, render_page};
 use argentajo_core::piece::{Piece, PrepareOptions, RealSize, prepare_piece};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 const SEEDS: [u64; 2] = [1, 2];
 const TIME_LIMIT: Duration = Duration::from_secs(2);
@@ -61,6 +62,7 @@ fn job(sheet_mm: [f64; 2], items: Vec<(Piece, u32)>) -> Job {
         sheet_mm,
         separation_mm: 1.0,
         edge_margin_mm: 1.5,
+        time_limit: TIME_LIMIT,
         items: items
             .into_iter()
             .map(|(piece, quantity)| JobItem { piece, quantity })
@@ -208,9 +210,13 @@ fn assert_valid(job: &Job, layout: &Layout) {
 }
 
 fn nest_valid(job: &Job, seed: u64) -> Layout {
-    let layout = nest(job, seed, TIME_LIMIT).unwrap();
+    let layout = try_nest(job, seed).unwrap();
     assert_valid(job, &layout);
     layout
+}
+
+fn try_nest(job: &Job, seed: u64) -> Result<Layout, argentajo_core::nest::NestError> {
+    nest(job, seed, |_| {}, &AtomicBool::new(false))
 }
 
 fn mixed_items() -> Vec<(Piece, u32)> {
@@ -223,6 +229,19 @@ fn mixed_items() -> Vec<(Piece, u32)> {
             3,
         ),
     ]
+}
+
+/// More than fits, so the run has plenty to improve on.
+fn crowded_job(time_limit: Duration) -> Job {
+    let mut job = job(
+        [120.0, 70.0],
+        mixed_items()
+            .into_iter()
+            .map(|(piece, quantity)| (piece, quantity * 6))
+            .collect(),
+    );
+    job.time_limit = time_limit;
+    job
 }
 
 #[test]
@@ -310,10 +329,10 @@ fn a_copy_is_placed_with_all_its_parts_or_missing() {
 
 #[test]
 fn rejects_an_empty_sheet_or_negative_spacing() {
-    assert!(nest(&job([0.0, 50.0], vec![]), 1, TIME_LIMIT).is_err());
+    assert!(try_nest(&job([0.0, 50.0], vec![]), 1).is_err());
     let mut negative = job([100.0, 50.0], vec![]);
     negative.edge_margin_mm = -1.0;
-    assert!(nest(&negative, 1, TIME_LIMIT).is_err());
+    assert!(try_nest(&negative, 1).is_err());
 }
 
 #[test]
@@ -331,7 +350,7 @@ fn a_piece_that_only_just_fits_across_is_placed_or_missing() {
 #[test]
 fn rejects_a_sheet_larger_than_the_paper() {
     let job = job([250.0, 100.0], vec![]);
-    assert!(nest(&job, 1, TIME_LIMIT).is_err());
+    assert!(try_nest(&job, 1).is_err());
 }
 
 #[test]
@@ -358,4 +377,77 @@ fn renders_the_page_in_mm_with_every_placed_part() {
     assert!((tree.size().width() - 210.0 * px_per_mm).abs() < 0.01);
     assert!((tree.size().height() - 297.0 * px_per_mm).abs() < 0.01);
     assert_eq!(svg.matches("<use ").count(), 6, "one image per placed part");
+}
+
+#[test]
+fn reports_every_improved_layout_and_returns_the_best() {
+    let job = job([120.0, 70.0], mixed_items());
+    let mut reported = vec![];
+    let layout = nest(
+        &job,
+        1,
+        |l| reported.push(l.clone()),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(
+        !reported.is_empty(),
+        "at least the first layout is reported"
+    );
+    for l in &reported {
+        assert_valid(&job, l);
+    }
+    assert_eq!(
+        reported.last(),
+        Some(&layout),
+        "the best is the last reported"
+    );
+}
+
+#[test]
+fn cancelling_mid_run_returns_a_valid_layout() {
+    let job = crowded_job(Duration::from_secs(60));
+    let cancel = AtomicBool::new(false);
+    let start = Instant::now();
+    let mut reported = vec![];
+    let layout = nest(
+        &job,
+        1,
+        |l| {
+            reported.push(l.clone());
+            cancel.store(true, Ordering::Relaxed);
+        },
+        &cancel,
+    )
+    .unwrap();
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        start.elapsed()
+    );
+    assert_valid(&job, &layout);
+    assert_eq!(reported.last(), Some(&layout), "the best so far is kept");
+    assert!(layout.placed.iter().sum::<u32>() > 0);
+}
+
+#[test]
+fn never_runs_past_the_time_limit() {
+    let job = crowded_job(Duration::from_secs(2));
+    let start = Instant::now();
+    let mut first = None;
+    let layout = nest(
+        &job,
+        1,
+        |_| _ = first.get_or_insert_with(|| start.elapsed()),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    // The first Layout is always waited for; there is nothing valid to return before it.
+    let bound = job.time_limit.max(first.unwrap()) + Duration::from_millis(200);
+    assert!(
+        start.elapsed() < bound,
+        "took {:?}, first layout at {first:?}",
+        start.elapsed()
+    );
+    assert_valid(&job, &layout);
 }

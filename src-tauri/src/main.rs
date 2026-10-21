@@ -7,9 +7,11 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::Manager;
-use tauri::ipc::{InvokeBody, Request};
+use tauri::ipc::{Channel, InvokeBody, Request};
+use tauri::{Manager, State};
 
 #[tauri::command]
 fn core_version() -> &'static str {
@@ -247,9 +249,6 @@ fn list_library(app: tauri::AppHandle) -> Result<Vec<PieceView>, String> {
     Ok(pieces)
 }
 
-// ponytail: fixed bound on a nesting run; becomes a per-Job setting with stop and live progress (#9).
-const NEST_TIME_LIMIT: Duration = Duration::from_secs(60);
-
 /// A Job as the frontend sends it: Library piece ids with their quantities.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -258,6 +257,7 @@ struct JobRequest {
     sheet_mm: [f64; 2],
     separation_mm: f64,
     edge_margin_mm: f64,
+    time_limit_s: f64,
     items: Vec<ItemRequest>,
 }
 
@@ -275,8 +275,28 @@ struct NestView {
     layout: Layout,
 }
 
+impl NestView {
+    fn new(job: &Job, layout: Layout) -> Self {
+        Self {
+            svg: render_page(job, &layout),
+            layout,
+        }
+    }
+}
+
+/// The cancellation token of the latest nesting run.
+#[derive(Default)]
+struct Nesting(Mutex<Arc<AtomicBool>>);
+
+/// Nests on a worker thread, sending every improved Layout to `on_progress`, and returns the best
+/// once the time limit is up or `stop_nesting` is called. A new run stops the one in progress.
 #[tauri::command(async)]
-fn nest_job(app: tauri::AppHandle, job: JobRequest) -> Result<NestView, String> {
+fn nest_job(
+    app: tauri::AppHandle,
+    nesting: State<Nesting>,
+    job: JobRequest,
+    on_progress: Channel<NestView>,
+) -> Result<NestView, String> {
     let items = job
         .items
         .into_iter()
@@ -292,17 +312,31 @@ fn nest_job(app: tauri::AppHandle, job: JobRequest) -> Result<NestView, String> 
         sheet_mm: job.sheet_mm,
         separation_mm: job.separation_mm,
         edge_margin_mm: job.edge_margin_mm,
+        time_limit: Duration::try_from_secs_f64(job.time_limit_s).map_err(|e| e.to_string())?,
         items,
     };
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos() as u64;
-    let layout = nest(&job, seed, NEST_TIME_LIMIT).map_err(|e| e.to_string())?;
-    Ok(NestView {
-        svg: render_page(&job, &layout),
-        layout,
-    })
+    let cancel = Arc::new(AtomicBool::new(false));
+    let previous = std::mem::replace(&mut *nesting.0.lock().unwrap(), cancel.clone());
+    previous.store(true, Ordering::Relaxed);
+    let layout = nest(
+        &job,
+        seed,
+        // The frontend may have moved on; nothing to do then.
+        |layout| _ = on_progress.send(NestView::new(&job, layout.clone())),
+        &cancel,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(NestView::new(&job, layout))
+}
+
+/// Ends the latest nesting run, which then returns the best Layout so far.
+#[tauri::command]
+fn stop_nesting(nesting: State<Nesting>) {
+    nesting.0.lock().unwrap().store(true, Ordering::Relaxed);
 }
 
 fn main() {
@@ -314,6 +348,7 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .manage(Nesting::default())
         .invoke_handler(tauri::generate_handler![
             core_version,
             preview_piece,
@@ -323,7 +358,8 @@ fn main() {
             open_piece,
             delete_piece,
             list_library,
-            nest_job
+            nest_job,
+            stop_nesting
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

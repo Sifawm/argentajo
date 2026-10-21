@@ -2,8 +2,10 @@
 
 use crate::piece::Piece;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use jagua_rs::Instant;
 use jagua_rs::io::ext_repr::{ExtOrientation, ExtRotation, ExtSPolygon, ExtShape};
 use jagua_rs::io::import::Importer;
+use jagua_rs::probs::spp::entities::SPSolution;
 use jagua_rs::probs::spp::io::ext_repr::{ExtItem, ExtSPInstance};
 use jagua_rs::probs::spp::io::{export, import_instance};
 use rand::SeedableRng;
@@ -16,9 +18,13 @@ use sparrow::consts::{
 };
 use sparrow::optimizer::lbf::ConstructionError;
 use sparrow::optimizer::optimize;
-use sparrow::util::listener::DummySolListener;
-use sparrow::util::terminator::BasicTerminator;
+use sparrow::util::listener::{ReportType, SolutionListener};
+use sparrow::util::terminator::{BasicTerminator, Terminator};
 use std::fmt::Write;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
 use std::time::Duration;
 
 /// The printable page, oriented as printed. Sizes in mm.
@@ -39,6 +45,8 @@ pub struct Job {
     pub separation_mm: f64,
     /// Minimum distance between a piece and the Sheet's edge.
     pub edge_margin_mm: f64,
+    /// Bound on a nesting run.
+    pub time_limit: Duration,
     pub items: Vec<JobItem>,
 }
 
@@ -104,7 +112,17 @@ impl std::error::Error for NestError {}
 
 /// Strip-packs the fixed quantities along the Sheet's long side with sparrow, compacted towards
 /// its start. Copies past the Sheet's end, or that don't fit it at all, are missing.
-pub fn nest(job: &Job, seed: u64, time_limit: Duration) -> Result<Layout, NestError> {
+///
+/// Runs until the Job's time limit or `cancel`, though always until a first Layout, and returns the
+/// best Layout found: the most silver used, then the shortest stretch of Sheet. `on_progress` gets each Layout
+/// better than the last, so the last one it gets is the one returned.
+pub fn nest(
+    job: &Job,
+    seed: u64,
+    mut on_progress: impl FnMut(&Layout),
+    cancel: &AtomicBool,
+) -> Result<Layout, NestError> {
+    let deadline = Instant::now() + job.time_limit;
     let Paper {
         size_mm: [paper_w, paper_h],
         margin_mm,
@@ -162,7 +180,65 @@ pub fn nest(job: &Job, seed: u64, time_limit: Duration) -> Result<Layout, NestEr
             .collect();
         unplaceable[i] |= !fits_across(&contour, piece.allow_rotation, across);
     }
-    let solution = loop {
+    // Per Part, the placements that end before the Sheet's far edge margin, nearest the start first,
+    // as a Layout with the length of Sheet it uses.
+    // ponytail: copies past the end are dropped from the full-quantity solution, leaving their gaps;
+    // re-run sparrow on what fits if those gaps ever matter.
+    let end = long - margin - inset;
+    let layout_of = |unplaceable: &[bool], solution: Solution| {
+        let mut fitting = vec![vec![]; parts.len()];
+        for (id, transform) in solution {
+            let (i, part) = parts[id as usize];
+            let in_strip = compose(transform, into_strip);
+            let reach = job.items[i].piece.contours[part]
+                .iter()
+                .map(|&p| apply(in_strip, p)[0])
+                .fold(f64::NEG_INFINITY, f64::max);
+            if reach <= end {
+                fitting[id as usize].push((reach, compose(to_sheet, in_strip)));
+            }
+        }
+        let mut placed: Vec<u32> = job.items.iter().map(|item| item.quantity).collect();
+        for (&(i, _), fits) in parts.iter().zip(&mut fitting) {
+            placed[i] = placed[i].min(fits.len() as u32);
+            fits.sort_by(|a, b| a.0.total_cmp(&b.0));
+        }
+        for (placed, &unplaceable) in placed.iter_mut().zip(unplaceable) {
+            if unplaceable {
+                *placed = 0;
+            }
+        }
+
+        let mut placements = vec![];
+        let mut area = 0.0;
+        let mut length = 0.0f64;
+        for (&(item, part), fits) in parts.iter().zip(&fitting) {
+            let n = placed[item] as usize;
+            area += n as f64 * polygon_area(&job.items[item].piece.contours[part]);
+            length = fits[..n].iter().map(|f| f.0).fold(length, f64::max);
+            placements.extend(fits[..n].iter().map(|&(_, transform)| Placement {
+                item,
+                part,
+                transform,
+            }));
+        }
+        let layout = Layout {
+            sheet_origin_mm: [margin_mm, margin_mm],
+            placements,
+            missing: job
+                .items
+                .iter()
+                .zip(&placed)
+                .map(|(item, placed)| item.quantity - placed)
+                .collect(),
+            placed,
+            utilisation: area / (w * h),
+        };
+        (layout, length)
+    };
+
+    let mut best: Option<(Layout, f64)> = None;
+    loop {
         let items: Vec<ExtItem> = parts
             .iter()
             .enumerate()
@@ -202,7 +278,7 @@ pub fn nest(job: &Job, seed: u64, time_limit: Duration) -> Result<Layout, NestEr
             })
             .collect();
         if items.is_empty() {
-            break vec![];
+            break;
         }
         let instance = ExtSPInstance {
             name: String::new(),
@@ -210,11 +286,18 @@ pub fn nest(job: &Job, seed: u64, time_limit: Duration) -> Result<Layout, NestEr
             items,
             strip_height: (short - 2.0 * inset) as f32,
         };
-        // jagua-rs asserts on some degenerate input; that must not take the caller down.
-        let result = std::panic::catch_unwind(|| strip_pack(&instance, seed, time_limit))
-            .map_err(|_| NestError::Engine("the nesting engine crashed".into()))?;
-        match result {
-            Ok(solution) => break solution,
+        let on_solution = |solution| {
+            let (layout, length) = layout_of(&unplaceable, solution);
+            let better = best.as_ref().is_none_or(|(best, best_length)| {
+                (layout.utilisation, -length) > (best.utilisation, -best_length)
+            });
+            if better {
+                on_progress(&layout);
+                best = Some((layout, length));
+            }
+        };
+        match strip_pack(instance, seed, deadline, cancel, on_solution) {
+            Ok(()) => break,
             // A Part that only just fits across on paper, but not once jagua-rs has simplified and
             // inflated it: missing too.
             Err(e) => match e.downcast_ref::<ConstructionError>() {
@@ -224,58 +307,8 @@ pub fn nest(job: &Job, seed: u64, time_limit: Duration) -> Result<Layout, NestEr
                 None => return Err(NestError::Engine(e.to_string())),
             },
         }
-    };
-
-    // Per Part, the placements that end before the Sheet's far edge margin, nearest the start first.
-    // ponytail: copies past the end are dropped from the full-quantity solution, leaving their gaps;
-    // re-run sparrow on what fits if those gaps ever matter.
-    let end = long - margin - inset;
-    let mut fitting = vec![vec![]; parts.len()];
-    for (id, transform) in solution {
-        let (i, part) = parts[id as usize];
-        let in_strip = compose(transform, into_strip);
-        let reach = job.items[i].piece.contours[part]
-            .iter()
-            .map(|&p| apply(in_strip, p)[0])
-            .fold(f64::NEG_INFINITY, f64::max);
-        if reach <= end {
-            fitting[id as usize].push((reach, compose(to_sheet, in_strip)));
-        }
     }
-    let mut placed: Vec<u32> = job.items.iter().map(|item| item.quantity).collect();
-    for (&(i, _), fits) in parts.iter().zip(&mut fitting) {
-        placed[i] = placed[i].min(fits.len() as u32);
-        fits.sort_by(|a, b| a.0.total_cmp(&b.0));
-    }
-    for (placed, &unplaceable) in placed.iter_mut().zip(&unplaceable) {
-        if unplaceable {
-            *placed = 0;
-        }
-    }
-
-    let mut placements = vec![];
-    let mut area = 0.0;
-    for (&(item, part), fits) in parts.iter().zip(&fitting) {
-        let n = placed[item] as usize;
-        area += n as f64 * polygon_area(&job.items[item].piece.contours[part]);
-        placements.extend(fits[..n].iter().map(|&(_, transform)| Placement {
-            item,
-            part,
-            transform,
-        }));
-    }
-    Ok(Layout {
-        sheet_origin_mm: [margin_mm, margin_mm],
-        placements,
-        missing: job
-            .items
-            .iter()
-            .zip(&placed)
-            .map(|(item, placed)| item.quantity - placed)
-            .collect(),
-        placed,
-        utilisation: area / (w * h),
-    })
+    Ok(best.map_or_else(|| layout_of(&unplaceable, vec![]).0, |(layout, _)| layout))
 }
 
 /// Whether `contour` fits in a strip `width` across, in some orientation it may take.
@@ -295,48 +328,129 @@ fn fits_across(contour: &[[f64; 2]], allow_rotation: bool, width: f64) -> bool {
     })
 }
 
-/// sparrow's solution as (item id, transformation of the item's shape into the strip).
+/// Runs sparrow until `deadline` or `cancel`, passing each feasible solution it reaches, every one
+/// narrower than the last, to `on_solution` as (item id, transformation of the item's shape into
+/// the strip).
+///
+/// sparrow runs on its own thread: it checks for the end only between steps, and some steps take
+/// seconds on a crowded strip. This returns at the deadline or on cancel all the same, once there
+/// is a first solution, and leaves sparrow to end at its next check.
+// ponytail: sparrow keeps a core busy for that last step after we return; patch it to check more
+// often if overlapping runs ever matter.
 fn strip_pack(
-    instance: &ExtSPInstance,
+    instance: ExtSPInstance,
     seed: u64,
-    time_limit: Duration,
-) -> anyhow::Result<Vec<(u64, Affine)>> {
-    let mut config = DEFAULT_SPARROW_CONFIG;
-    config.expl_cfg.time_limit = time_limit.mul_f32(DEFAULT_EXPLORE_TIME_RATIO);
-    config.cmpr_cfg.time_limit = time_limit.mul_f32(DEFAULT_COMPRESS_TIME_RATIO);
-    // Stop once it stops improving, rather than always running out the clock.
-    config.expl_cfg.max_conseq_failed_attempts = Some(DEFAULT_MAX_CONSEQ_FAILS_EXPL);
-    config.cmpr_cfg.shrink_decay = ShrinkDecayStrategy::FailureBased(DEFAULT_FAIL_DECAY_RATIO_CMPR);
-    let importer = Importer::new(
-        config.cde_config,
-        config.poly_simpl_tolerance,
-        config.narrow_concavity_cutoff_ratio,
-    );
-    let solution = optimize(
-        import_instance(&importer, instance)?,
-        Xoshiro256PlusPlus::seed_from_u64(seed),
-        &mut DummySolListener,
-        &mut BasicTerminator::new(),
-        &config.expl_cfg,
-        &config.cmpr_cfg,
-        None,
-    )?;
-    Ok(export(&solution, *sparrow::EPOCH)
-        .layout
-        .placed_items
-        .into_iter()
-        .map(|placed| {
-            let t = placed.transformation;
-            let (sin, cos) = (t.rotation as f64).to_radians().sin_cos();
-            // Reflect (y negated), then rotate, then translate.
-            let reflect = if t.reflected { -1.0 } else { 1.0 };
-            let (x, y) = t.translation;
-            (
-                placed.item_id,
-                [cos, sin, -sin * reflect, cos * reflect, x as f64, y as f64],
-            )
+    deadline: Instant,
+    cancel: &AtomicBool,
+    mut on_solution: impl FnMut(Solution),
+) -> anyhow::Result<()> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (send, solutions) = mpsc::channel();
+    let sparrow = {
+        let stop = stop.clone();
+        thread::spawn(move || -> anyhow::Result<()> {
+            let time_limit = deadline.saturating_duration_since(Instant::now());
+            let mut config = DEFAULT_SPARROW_CONFIG;
+            config.expl_cfg.time_limit = time_limit.mul_f32(DEFAULT_EXPLORE_TIME_RATIO);
+            config.cmpr_cfg.time_limit = time_limit.mul_f32(DEFAULT_COMPRESS_TIME_RATIO);
+            // Stop once it stops improving, rather than always running out the clock.
+            config.expl_cfg.max_conseq_failed_attempts = Some(DEFAULT_MAX_CONSEQ_FAILS_EXPL);
+            config.cmpr_cfg.shrink_decay =
+                ShrinkDecayStrategy::FailureBased(DEFAULT_FAIL_DECAY_RATIO_CMPR);
+            let importer = Importer::new(
+                config.cde_config,
+                config.poly_simpl_tolerance,
+                config.narrow_concavity_cutoff_ratio,
+            );
+            optimize(
+                import_instance(&importer, &instance)?,
+                Xoshiro256PlusPlus::seed_from_u64(seed),
+                &mut Listener(send),
+                &mut Stopper {
+                    phase: BasicTerminator::new(),
+                    deadline,
+                    stop,
+                },
+                &config.expl_cfg,
+                &config.cmpr_cfg,
+                None,
+            )?;
+            Ok(())
         })
-        .collect())
+    };
+    let mut solved = false;
+    loop {
+        // Wakes this often to notice the deadline or a cancel between solutions.
+        match solutions.recv_timeout(Duration::from_millis(20)) {
+            Ok(solution) => {
+                solved = true;
+                on_solution(solution);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            // jagua-rs asserts on some degenerate input; that must not take the caller down.
+            Err(RecvTimeoutError::Disconnected) => {
+                return sparrow
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("the nesting engine crashed")));
+            }
+        }
+        if solved && (cancel.load(Ordering::Relaxed) || Instant::now() > deadline) {
+            stop.store(true, Ordering::Relaxed);
+            return Ok(());
+        }
+    }
+}
+
+/// Sends on the exploration's and compression's feasible solutions, each narrower than the last.
+struct Listener(mpsc::Sender<Solution>);
+
+impl SolutionListener for Listener {
+    fn report(&mut self, report: ReportType, solution: &SPSolution) {
+        if !matches!(report, ReportType::ExplFeas | ReportType::CmprFeas) {
+            return;
+        }
+        // Fails only once `strip_pack` has returned, and then nobody is listening.
+        _ = self.0.send(
+            export(solution, *sparrow::EPOCH)
+                .layout
+                .placed_items
+                .into_iter()
+                .map(|placed| {
+                    let t = placed.transformation;
+                    let (sin, cos) = (t.rotation as f64).to_radians().sin_cos();
+                    // Reflect (y negated), then rotate, then translate.
+                    let reflect = if t.reflected { -1.0 } else { 1.0 };
+                    let (x, y) = t.translation;
+                    (
+                        placed.item_id,
+                        [cos, sin, -sin * reflect, cos * reflect, x as f64, y as f64],
+                    )
+                })
+                .collect(),
+        );
+    }
+}
+
+/// Ends each of sparrow's phases at its own time limit, and the whole run at the deadline or once
+/// it's no longer wanted.
+struct Stopper {
+    phase: BasicTerminator,
+    deadline: Instant,
+    stop: Arc<AtomicBool>,
+}
+
+impl Terminator for Stopper {
+    fn kill(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || Instant::now() > self.deadline || self.phase.kill()
+    }
+
+    fn new_timeout(&mut self, timeout: Duration) {
+        self.phase.new_timeout(timeout)
+    }
+
+    fn timeout_at(&self) -> Option<Instant> {
+        self.phase.timeout_at().map(|t| t.min(self.deadline))
+    }
 }
 
 /// The page as an SVG in mm: the Sheet's outline and each placed Part's image, as nested.
@@ -397,6 +511,9 @@ fn points(polygon: &[[f64; 2]]) -> String {
 
 /// An affine transformation in SVG `matrix(a b c d e f)` order.
 type Affine = [f64; 6];
+
+/// A sparrow solution: per placed item, its id and the transformation of its shape into the strip.
+type Solution = Vec<(u64, Affine)>;
 
 const fn translate(x: f64, y: f64) -> Affine {
     [1.0, 0.0, 0.0, 1.0, x, y]

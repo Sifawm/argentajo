@@ -17,6 +17,7 @@
   "heightMm": "Alto (mm)",
   "separation": "Separación (mm)",
   "edgeMargin": "Margen al borde (mm)",
+  "timeLimit": "Tiempo máximo (s)",
   "pieces": "Piezas",
   "dropHere": "Arrastra aquí piezas de la Biblioteca de abajo.",
   "libraryHint": "Biblioteca: arrastra una pieza a la lista de arriba o haz clic para añadir una más.",
@@ -24,7 +25,8 @@
   "quantity": "Cantidad",
   "remove": "Quitar",
   "calculate": "Calcular",
-  "calculating": "Calculando…",
+  "recalculate": "Recalcular",
+  "stop": "Parar, así está bien",
   "nestFailed": "No se pudo calcular la distribución: {{error}}",
   "noResult": "Configura el trabajo y pulsa Calcular para ver la distribución.",
   "utilisation": "Plata aprovechada: {{value, number(style: percent; maximumFractionDigits: 1)}}",
@@ -34,5 +36,6 @@
   "times": "{{count}} ×",
   "preview": "Vista previa de la página",
   "placedOf": "{{placed}} / {{quantity}}",
+  "exclude": "Excluir del resultado",
   "stale": "Los ajustes cambiaron desde esta distribución. Pulsa Calcular para actualizarla."
 }
