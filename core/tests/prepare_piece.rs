@@ -11,7 +11,9 @@
 //!   20 × 20 mm, so the ring is 16 mm across.
 //! - `two_parts_rotated.jpg`: `two_parts.png` stored as is, with EXIF orientation 6 (rotate 90° clockwise).
 
-use argentajo_core::piece::{Piece, PrepareError, PrepareOptions, RealSize, prepare_piece};
+use argentajo_core::piece::{
+    Piece, PrepareError, PrepareOptions, RealSize, prepare_piece, split_piece,
+};
 use image::{ImageFormat, Rgba, RgbaImage};
 use std::io::Cursor;
 
@@ -282,6 +284,10 @@ fn edits(w: u32, h: u32, strokes: &[(Rgba<u8>, [u32; 4])]) -> Vec<u8> {
             }
         }
     }
+    encode(&image)
+}
+
+fn encode(image: &RgbaImage) -> Vec<u8> {
     let mut png = Vec::new();
     image
         .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
@@ -468,4 +474,64 @@ fn an_svg_without_physical_units_has_no_dpi() {
     let piece = prepare_piece(svg, &PrepareOptions::default()).unwrap();
 
     assert_eq!(piece.size_mm[0], 20.0);
+}
+
+#[test]
+fn splitting_yields_one_piece_per_part_at_the_source_scale() {
+    // Discs r=40 and r=20 spanning x 20..190 → 170 px wide; at 17 mm that is 0.1 mm/px.
+    let pieces = split_piece(&fixture("two_parts.png"), &width(17.0)).unwrap();
+    let [big, small] = &pieces[..] else {
+        panic!("expected two pieces, got {}", pieces.len())
+    };
+
+    assert_near(big.size_mm[0], 8.0, 0.2);
+    assert_near(small.size_mm[0], 4.0, 0.2);
+    assert_eq!(big.offset_px, [20, 20]);
+    assert_eq!(small.offset_px, [150, 40]);
+    assert_near(
+        polygon_area(only_contour(small)),
+        std::f64::consts::PI * 2.0 * 2.0,
+        0.6,
+    );
+    assert_eq!(big.ppi, small.ppi);
+}
+
+#[test]
+fn the_split_count_matches_the_parts_offered_and_ignores_specks() {
+    for (name, parts) in [
+        ("two_parts.png", 2),
+        ("flower_with_speck.png", 1),
+        ("ring.png", 1),
+    ] {
+        let options = PrepareOptions::default();
+        let pieces = split_piece(&fixture(name), &options).unwrap();
+        assert_eq!(pieces.len(), parts, "{name}");
+        assert_eq!(
+            pieces.len(),
+            prepare(name, options).contours.len(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_split_piece_keeps_only_its_own_part_in_the_image() {
+    // A dot r=10 inside a ring's hole (outer r=60, inner r=30): two parts, one inside the other.
+    let mut image = RgbaImage::from_pixel(160, 160, Rgba([255, 255, 255, 255]));
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let r = ((x as f64 - 80.0).powi(2) + (y as f64 - 80.0).powi(2)).sqrt();
+        if r < 10.0 || (30.0..60.0).contains(&r) {
+            *pixel = Rgba([30, 58, 138, 255]);
+        }
+    }
+    let pieces = split_piece(&encode(&image), &PrepareOptions::default()).unwrap();
+    let [ring, _dot] = &pieces[..] else {
+        panic!("expected two pieces, got {}", pieces.len())
+    };
+    let [w, h] = ring.size_px;
+    assert_eq!(
+        alpha_at(ring, w / 2, h / 2),
+        0,
+        "the dot is not in the ring's image"
+    );
 }

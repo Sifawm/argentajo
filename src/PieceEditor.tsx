@@ -8,6 +8,7 @@ import {
   type PieceView,
   type PrepareOptions,
   previewPiece,
+  splitToLibrary,
 } from "./library";
 
 type Side = "width" | "height";
@@ -21,7 +22,8 @@ interface Props {
   /** MIME type of `image`, so the browser can show it (SVGs need it). */
   type: string;
   onClose: () => void;
-  onAdded: (piece: PieceView) => void;
+  /** One piece, or one per Part when split. */
+  onAdded: (pieces: PieceView[]) => void;
 }
 
 export default function PieceEditor({ image, type, onClose, onAdded }: Props) {
@@ -92,12 +94,16 @@ export default function PieceEditor({ image, type, onClose, onAdded }: Props) {
       );
     });
 
-  const accept = () => {
+  const accept = (split: boolean) => {
     if (!options) return;
     setSaving(true);
     // Exported afresh: the last stroke's preview may still be pending.
     void exportEdits()
-      .then((edits) => addToLibrary(image, options, edits))
+      .then((edits) =>
+        split
+          ? splitToLibrary(image, options, edits)
+          : addToLibrary(image, options, edits).then((piece) => [piece]),
+      )
       .then(onAdded, (e) => {
         setError(String(e));
         setSaving(false);
@@ -313,10 +319,21 @@ export default function PieceEditor({ image, type, onClose, onAdded }: Props) {
             <Dialog.Close className="rounded-md px-4 py-2 text-sm hover:bg-zinc-100">
               {t("cancel")}
             </Dialog.Close>
+            {/* Only on request: a motif's detached parts usually belong together. */}
+            {preview && preview.contours.length > 1 && (
+              <button
+                type="button"
+                disabled={!options || !!error || saving}
+                onClick={() => accept(true)}
+                className="rounded-md border border-zinc-300 px-4 py-2 text-sm disabled:opacity-40"
+              >
+                {t("split", { count: preview.contours.length })}
+              </button>
+            )}
             <button
               type="button"
               disabled={!options || !preview || !!error || saving}
-              onClick={accept}
+              onClick={() => accept(false)}
               className="rounded-md bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-40"
             >
               {t("accept")}

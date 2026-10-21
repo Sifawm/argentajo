@@ -34,7 +34,7 @@ export type Edits = Uint8Array;
 
 // The image goes as the raw body and the options as a header, so the bytes are not JSON-encoded.
 // Edits are appended to the body, with their length in a header.
-const prepare = (
+const prepare = <T = PieceView>(
   command: string,
   image: Uint8Array,
   options: PrepareOptions,
@@ -43,7 +43,7 @@ const prepare = (
   const body = new Uint8Array(image.length + edits.length);
   body.set(image);
   body.set(edits, image.length);
-  return invoke<PieceView>(command, body, {
+  return invoke<T>(command, body, {
     headers: { options: JSON.stringify(options), "edits-length": String(edits.length) },
   });
 };
@@ -53,5 +53,9 @@ export const previewPiece = (image: Uint8Array, options: PrepareOptions, edits?:
 
 export const addToLibrary = (image: Uint8Array, options: PrepareOptions, edits?: Edits) =>
   prepare("add_to_library", image, options, edits);
+
+/** One Library piece per Part, all at the scale `options.size` gives the whole image. */
+export const splitToLibrary = (image: Uint8Array, options: PrepareOptions, edits?: Edits) =>
+  prepare<PieceView[]>("split_to_library", image, options, edits);
 
 export const listLibrary = () => invoke<PieceView[]>("list_library");

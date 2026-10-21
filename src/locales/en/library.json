@@ -22,5 +22,6 @@
   "prepareFailed": "Could not prepare this image: {{error}}",
   "cancel": "Cancel",
   "accept": "Add to Library",
+  "split": "Split into {{count}} pieces",
   "loadFailed": "Could not load the Library: {{error}}"
 }

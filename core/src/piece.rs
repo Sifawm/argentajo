@@ -140,40 +140,80 @@ impl From<usvg::Error> for PrepareError {
 }
 
 pub fn prepare_piece(bytes: &[u8], options: &PrepareOptions) -> Result<Piece, PrepareError> {
-    let (mut image, dpi) = decode(bytes)?;
-    let source_px = [image.width(), image.height()];
+    let (image, mask, mm_per_px) = clean(bytes, options)?;
+    cut_out(&image, &mask, mm_per_px, options)
+}
+
+/// One Piece per Part, at the scale the whole image gets from `options.size`, so the Pieces keep
+/// their real sizes relative to each other. Only on request: a motif's detached parts belong together.
+pub fn split_piece(bytes: &[u8], options: &PrepareOptions) -> Result<Vec<Piece>, PrepareError> {
+    let (image, mask, mm_per_px) = clean(bytes, options)?;
+    let labels = connected_components(&mask, Connectivity::Eight, Luma([0u8]));
+    let parts = labels.pixels().map(|l| l[0]).max().unwrap_or(0);
+    // ponytail: a full-size mask per part, O(parts × pixels); crop each from its component's bounds
+    // if images with many parts (lettering) get slow.
+    (1..=parts)
+        .map(|part| {
+            let mask = GrayImage::from_fn(mask.width(), mask.height(), |x, y| {
+                Luma([if labels.get_pixel(x, y)[0] == part {
+                    255
+                } else {
+                    0
+                }])
+            });
+            cut_out(&image, &mask, mm_per_px, options)
+        })
+        .collect()
+}
+
+/// The source image, its final mask (edits applied, specks dropped) and the mm per px that gives
+/// the whole foreground its real size.
+fn clean(
+    bytes: &[u8],
+    options: &PrepareOptions,
+) -> Result<(RgbaImage, GrayImage, f64), PrepareError> {
+    let (image, dpi) = decode(bytes)?;
     let mut mask = mask(&image, options.tolerance);
     if let Some(edits) = &options.edits {
         apply_edits(&mut mask, &image::load_from_memory(edits)?.to_rgba8())?;
     }
     // After the edits, so whatever an eraser stroke leaves behind goes too.
     drop_specks(&mut mask);
-    let (x0, y0, w, h) = bounding_box(&mask).ok_or(PrepareError::Empty)?;
-
-    for (pixel, mask_pixel) in image.pixels_mut().zip(mask.pixels()) {
-        if mask_pixel[0] == 0 {
-            pixel[3] = 0;
-        }
-    }
-    let cleaned: RgbaImage = image.view(x0, y0, w, h).to_image();
-    let mut png = Vec::new();
-    cleaned.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)?;
-
+    let (_, _, w, h) = bounding_box(&mask).ok_or(PrepareError::Empty)?;
     let size = options.size.unwrap_or(RealSize::Width(
         dpi.map_or(DEFAULT_WIDTH_MM, |dpi| w as f64 * 25.4 / dpi),
     ));
-    let (mm_per_px, size_mm) = match size {
-        RealSize::Width(mm) => (mm / w as f64, [mm, mm * h as f64 / w as f64]),
-        RealSize::Height(mm) => (mm / h as f64, [mm * w as f64 / h as f64, mm]),
+    let mm_per_px = match size {
+        RealSize::Width(mm) => mm / w as f64,
+        RealSize::Height(mm) => mm / h as f64,
     };
+    Ok((image, mask, mm_per_px))
+}
+
+/// The Piece `mask` cuts out of `image`, cropped to it.
+fn cut_out(
+    image: &RgbaImage,
+    mask: &GrayImage,
+    mm_per_px: f64,
+    options: &PrepareOptions,
+) -> Result<Piece, PrepareError> {
+    let (x0, y0, w, h) = bounding_box(mask).ok_or(PrepareError::Empty)?;
+    let mut cleaned: RgbaImage = image.view(x0, y0, w, h).to_image();
+    for (pixel, mask_pixel) in cleaned.pixels_mut().zip(mask.view(x0, y0, w, h).pixels()) {
+        if mask_pixel.2[0] == 0 {
+            pixel[3] = 0;
+        }
+    }
+    let mut png = Vec::new();
+    cleaned.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)?;
 
     let ppi = 25.4 / mm_per_px;
     Ok(Piece {
         png,
         size_px: [w, h],
         offset_px: [x0, y0],
-        source_px,
-        size_mm,
+        source_px: [image.width(), image.height()],
+        size_mm: [w as f64 * mm_per_px, h as f64 * mm_per_px],
         ppi,
         low_resolution: ppi < MIN_PPI,
         contours: contours(&mask.view(x0, y0, w, h).to_image(), mm_per_px),

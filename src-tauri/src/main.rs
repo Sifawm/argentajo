@@ -1,7 +1,7 @@
 // Prevents an additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use argentajo_core::piece::{Piece, PrepareOptions, prepare_piece};
+use argentajo_core::piece::{Piece, PrepareError, PrepareOptions, prepare_piece, split_piece};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use std::fs;
@@ -35,7 +35,10 @@ impl PieceView {
 /// Raw image bytes as the body, `PrepareOptions` as JSON in the `options` header,
 /// so the slider can re-prepare without serialising the image as a JSON array.
 /// Manual edits, if any, are appended to the body; `edits-length` says how many bytes they take.
-fn prepare(request: &Request) -> Result<Piece, String> {
+fn prepare<T>(
+    request: &Request,
+    run: fn(&[u8], &PrepareOptions) -> Result<T, PrepareError>,
+) -> Result<T, String> {
     let InvokeBody::Raw(bytes) = request.body() else {
         return Err("expected the image bytes as the request body".into());
     };
@@ -53,13 +56,13 @@ fn prepare(request: &Request) -> Result<Piece, String> {
     };
     let (image, edits) = bytes.split_at(bytes.len() - edits_length);
     options.edits = (edits_length > 0).then(|| edits.to_vec());
-    prepare_piece(image, &options).map_err(|e| e.to_string())
+    run(image, &options).map_err(|e| e.to_string())
 }
 
 // `async`: sync commands run on the main thread and would freeze the window while preparing.
 #[tauri::command(async)]
 fn preview_piece(request: Request) -> Result<PieceView, String> {
-    Ok(PieceView::new(None, prepare(&request)?))
+    Ok(PieceView::new(None, prepare(&request, prepare_piece)?))
 }
 
 fn library_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -71,16 +74,23 @@ fn library_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 /// Library layout: one folder per Piece holding `piece.png` and `piece.json`.
-#[tauri::command(async)]
-fn add_to_library(app: tauri::AppHandle, request: Request) -> Result<PieceView, String> {
-    let piece = prepare(&request)?;
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
-        .to_string();
-    let dir = library_dir(&app)?.join(&id);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+fn save(app: &tauri::AppHandle, piece: Piece) -> Result<PieceView, String> {
+    let library = library_dir(app)?;
+    fs::create_dir_all(&library).map_err(|e| e.to_string())?;
+    // A split saves several in a row: on a coarse clock the next id may still be taken.
+    let (id, dir) = loop {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let dir = library.join(&id);
+        match fs::create_dir(&dir) {
+            Ok(()) => break (id, dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    };
     fs::write(dir.join("piece.png"), &piece.png).map_err(|e| e.to_string())?;
     fs::write(
         dir.join("piece.json"),
@@ -88,6 +98,20 @@ fn add_to_library(app: tauri::AppHandle, request: Request) -> Result<PieceView, 
     )
     .map_err(|e| e.to_string())?;
     Ok(PieceView::new(Some(id), piece))
+}
+
+#[tauri::command(async)]
+fn add_to_library(app: tauri::AppHandle, request: Request) -> Result<PieceView, String> {
+    save(&app, prepare(&request, prepare_piece)?)
+}
+
+/// Splits the image into one Piece per Part and adds them all.
+#[tauri::command(async)]
+fn split_to_library(app: tauri::AppHandle, request: Request) -> Result<Vec<PieceView>, String> {
+    prepare(&request, split_piece)?
+        .into_iter()
+        .map(|piece| save(&app, piece))
+        .collect()
 }
 
 /// Every Piece in the Library, oldest first. Unreadable folders are skipped.
@@ -126,6 +150,7 @@ fn main() {
             core_version,
             preview_piece,
             add_to_library,
+            split_to_library,
             list_library
         ])
         .run(tauri::generate_context!())

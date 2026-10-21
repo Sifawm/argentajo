@@ -87,8 +87,8 @@ export default function LibraryView() {
           image={importing.bytes}
           type={importing.type}
           onClose={() => setImporting(undefined)}
-          onAdded={(piece) => {
-            setPieces((pieces) => [...pieces, piece]);
+          onAdded={(added) => {
+            setPieces((pieces) => [...pieces, ...added]);
             setImporting(undefined);
           }}
         />
