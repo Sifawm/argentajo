@@ -1,0 +1,20 @@
+{
+  "title": "Library",
+  "import": "Import PNG",
+  "empty": "No pieces yet. Import a PNG or drop one here.",
+  "sizeMm": "{{w, number(maximumFractionDigits: 1)}} × {{h, number(maximumFractionDigits: 1)}} mm",
+  "sizePx": "{{w}} × {{h}} px",
+  "editorTitle": "Prepare piece",
+  "editorDescription": "Adjust the background removal, set the real size and choose how the piece may be placed.",
+  "silhouette": "Cleaned piece with its detected silhouette",
+  "tolerance": "Background tolerance",
+  "toleranceHint": "Ignored for images that already have a transparent background.",
+  "width": "Width (mm)",
+  "height": "Height (mm)",
+  "allowRotation": "Allow rotation",
+  "allowMirror": "Allow mirroring",
+  "prepareFailed": "Could not prepare this image: {{error}}",
+  "cancel": "Cancel",
+  "accept": "Add to Library",
+  "loadFailed": "Could not load the Library: {{error}}"
+}

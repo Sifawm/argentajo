@@ -9,7 +9,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Argentajo", "width": 1200, "height": 800 }],
+    "windows": [{ "title": "Argentajo", "width": 1200, "height": 800, "dragDropEnabled": false }],
     "security": { "csp": null }
   },
   "bundle": {

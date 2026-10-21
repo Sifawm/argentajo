@@ -5,3 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+imageproc = { version = "0.27", default-features = false }
+serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,20 @@
+{
+  "title": "Biblioteca",
+  "import": "Importar PNG",
+  "empty": "Aún no hay piezas. Importa un PNG o suéltalo aquí.",
+  "sizeMm": "{{w, number(maximumFractionDigits: 1)}} × {{h, number(maximumFractionDigits: 1)}} mm",
+  "sizePx": "{{w}} × {{h}} px",
+  "editorTitle": "Preparar pieza",
+  "editorDescription": "Ajusta la eliminación del fondo, fija el tamaño real y elige cómo puede colocarse la pieza.",
+  "silhouette": "Pieza limpia con su silueta detectada",
+  "tolerance": "Tolerancia del fondo",
+  "toleranceHint": "No se aplica a imágenes que ya tienen fondo transparente.",
+  "width": "Ancho (mm)",
+  "height": "Alto (mm)",
+  "allowRotation": "Permitir rotación",
+  "allowMirror": "Permitir espejo",
+  "prepareFailed": "No se pudo preparar esta imagen: {{error}}",
+  "cancel": "Cancelar",
+  "accept": "Añadir a la Biblioteca",
+  "loadFailed": "No se pudo cargar la Biblioteca: {{error}}"
+}

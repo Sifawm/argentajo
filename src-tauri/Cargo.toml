@@ -5,8 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [build-dependencies]
-tauri-build = { version = "2" }
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 argentajo-core = { path = "../core" }
-tauri = { version = "2" }
+tauri = { version = "2", features = [] }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

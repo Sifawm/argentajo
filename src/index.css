@@ -3,3 +3,8 @@
 body {
   @apply bg-zinc-50 text-zinc-900 antialiased;
 }
+
+/* Shows transparency behind cleaned pieces. */
+@utility checkerboard {
+  background: repeating-conic-gradient(var(--color-zinc-200) 0 25%, white 0 50%) 0 0 / 16px 16px;
+}
