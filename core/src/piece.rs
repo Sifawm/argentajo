@@ -1,11 +1,16 @@
 //! Piece preparation: image bytes → background mask → cleaned image, real size and nesting contours.
 
-use image::{GenericImageView, GrayImage, ImageFormat, Luma, Rgba, RgbaImage};
+use image::{
+    DynamicImage, GenericImageView, GrayImage, ImageDecoder, ImageFormat, ImageReader, Luma, Rgba,
+    RgbaImage,
+};
 use imageproc::contours::{BorderType, find_contours};
 use imageproc::geometry::{approximate_polygon_dp, contour_area};
 use imageproc::region_labelling::{Connectivity, connected_components};
+use resvg::{tiny_skia, usvg};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
+use std::sync::{Arc, OnceLock};
 
 /// Contour simplification tolerance; small next to the ~1 mm saw separation.
 const SIMPLIFY_MM: f64 = 0.05;
@@ -14,6 +19,21 @@ const SIMPLIFY_MM: f64 = 0.05;
 // ponytail: relative so it holds before the real size is known; ~1 mm² on a 30 mm motif. Tune here, or
 // fix single cases with the brush (#1, story 7).
 const SPECK_FRACTION: f64 = 0.002;
+
+/// Below this effective resolution the print gets blurry and the contour inaccurate.
+pub const MIN_PPI: f64 = 150.0;
+
+/// Width of a Piece whose file declares no resolution, until the jeweller sets one.
+const DEFAULT_WIDTH_MM: f64 = 20.0;
+
+/// Longest side, in px, an SVG's drawing is rasterised to, and the cap for its whole page.
+// ponytail: fixed, so a vector stays above MIN_PPI up to ~340 mm unless a tiny drawing sits on a
+// huge page; derive them from the real size if that ever matters.
+const SVG_PX: f32 = 2048.0;
+const SVG_PAGE_PX: f32 = 4096.0;
+
+/// SVG units that give a real size; px (and unitless) are screen units.
+const SVG_PHYSICAL_UNITS: [&str; 5] = ["mm", "cm", "in", "pt", "pc"];
 
 /// The real size the jeweller sets: one side in mm, the other follows the proportions.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -29,7 +49,8 @@ pub struct PrepareOptions {
     /// Largest per-channel distance from white still treated as background (0–255).
     /// Ignored when the image already has transparency.
     pub tolerance: u8,
-    pub size: RealSize,
+    /// `None` takes it from the file's resolution (DPI), or `DEFAULT_WIDTH_MM` wide without one.
+    pub size: Option<RealSize>,
     pub allow_rotation: bool,
     pub allow_mirror: bool,
     /// Manual brush/eraser edits: a PNG the size of the source image. Transparent pixels keep the
@@ -43,7 +64,7 @@ impl Default for PrepareOptions {
     fn default() -> Self {
         Self {
             tolerance: 32,
-            size: RealSize::Width(20.0),
+            size: None,
             allow_rotation: true,
             allow_mirror: false,
             edits: None,
@@ -62,7 +83,17 @@ pub struct Piece {
     /// Top-left of the crop in the source image, in px.
     #[serde(default)]
     pub offset_px: [u32; 2],
+    /// Size of the decoded source image (upright, SVGs rasterised): what `offset_px` and the
+    /// manual edits refer to.
+    #[serde(default)]
+    pub source_px: [u32; 2],
     pub size_mm: [f64; 2],
+    /// Effective resolution at the real size, in px per inch.
+    #[serde(default)]
+    pub ppi: f64,
+    /// `ppi` is below `MIN_PPI`.
+    #[serde(default)]
+    pub low_resolution: bool,
     /// One outer silhouette per Part, largest first; interior holes are filled. Parts are cut
     /// separately but belong together: nesting places all of them or none.
     pub contours: Vec<Vec<[f64; 2]>>,
@@ -73,6 +104,7 @@ pub struct Piece {
 #[derive(Debug)]
 pub enum PrepareError {
     Image(image::ImageError),
+    Svg(usvg::Error),
     /// Everything was removed as background.
     Empty,
     /// The manual edits are not the size of the source image.
@@ -83,6 +115,7 @@ impl std::fmt::Display for PrepareError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::Image(e) => write!(f, "cannot read the image: {e}"),
+            Self::Svg(e) => write!(f, "cannot read the SVG: {e}"),
             Self::Empty => write!(
                 f,
                 "no motif found: the whole image was removed as background"
@@ -100,8 +133,15 @@ impl From<image::ImageError> for PrepareError {
     }
 }
 
+impl From<usvg::Error> for PrepareError {
+    fn from(e: usvg::Error) -> Self {
+        Self::Svg(e)
+    }
+}
+
 pub fn prepare_piece(bytes: &[u8], options: &PrepareOptions) -> Result<Piece, PrepareError> {
-    let mut image = image::load_from_memory(bytes)?.to_rgba8();
+    let (mut image, dpi) = decode(bytes)?;
+    let source_px = [image.width(), image.height()];
     let mut mask = mask(&image, options.tolerance);
     if let Some(edits) = &options.edits {
         apply_edits(&mut mask, &image::load_from_memory(edits)?.to_rgba8())?;
@@ -119,20 +159,119 @@ pub fn prepare_piece(bytes: &[u8], options: &PrepareOptions) -> Result<Piece, Pr
     let mut png = Vec::new();
     cleaned.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)?;
 
-    let (mm_per_px, size_mm) = match options.size {
+    let size = options.size.unwrap_or(RealSize::Width(
+        dpi.map_or(DEFAULT_WIDTH_MM, |dpi| w as f64 * 25.4 / dpi),
+    ));
+    let (mm_per_px, size_mm) = match size {
         RealSize::Width(mm) => (mm / w as f64, [mm, mm * h as f64 / w as f64]),
         RealSize::Height(mm) => (mm / h as f64, [mm * w as f64 / h as f64, mm]),
     };
 
+    let ppi = 25.4 / mm_per_px;
     Ok(Piece {
         png,
         size_px: [w, h],
         offset_px: [x0, y0],
+        source_px,
         size_mm,
+        ppi,
+        low_resolution: ppi < MIN_PPI,
         contours: contours(&mask.view(x0, y0, w, h).to_image(), mm_per_px),
         allow_rotation: options.allow_rotation,
         allow_mirror: options.allow_mirror,
     })
+}
+
+/// The source image, upright, with the resolution its file declares in px per inch, if any.
+/// Anything `image` doesn't recognise is read as an SVG.
+fn decode(bytes: &[u8]) -> Result<(RgbaImage, Option<f64>), PrepareError> {
+    let Ok(format) = image::guess_format(bytes) else {
+        return rasterise_svg(bytes);
+    };
+    let mut decoder = ImageReader::with_format(Cursor::new(bytes), format).into_decoder()?;
+    // Phone photos are often stored sideways, with an EXIF tag saying how to turn them.
+    let orientation = decoder.orientation()?;
+    let mut image = DynamicImage::from_decoder(decoder)?;
+    image.apply_orientation(orientation);
+    Ok((image.to_rgba8(), dpi(bytes)))
+}
+
+/// Rendered on a transparent background, the drawing `SVG_PX` on its longest side. A size declared
+/// in physical units (at CSS's 96 px per inch) becomes the resolution.
+fn rasterise_svg(bytes: &[u8]) -> Result<(RgbaImage, Option<f64>), PrepareError> {
+    // Loading the system fonts takes a while; once per run is enough.
+    static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    let options = usvg::Options {
+        fontdb: FONTS
+            .get_or_init(|| {
+                let mut fonts = usvg::fontdb::Database::new();
+                fonts.load_system_fonts();
+                Arc::new(fonts)
+            })
+            .clone(),
+        ..Default::default()
+    };
+    let text = std::str::from_utf8(bytes).map_err(|_| usvg::Error::NotAnUtf8Str)?;
+    let xml = usvg::roxmltree::Document::parse_with_options(
+        text,
+        usvg::roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
+    )
+    .map_err(usvg::Error::ParsingFailed)?;
+    let physical = xml.root_element().attribute("width").is_some_and(|width| {
+        SVG_PHYSICAL_UNITS
+            .iter()
+            .any(|unit| width.trim().ends_with(unit))
+    });
+    let tree = usvg::Tree::from_xmltree(&xml, &options)?;
+    let (page, drawing) = (tree.size(), tree.root().abs_layer_bounding_box());
+    let scale = (SVG_PX / drawing.width().max(drawing.height()))
+        .min(SVG_PAGE_PX / page.width().max(page.height()));
+    let (w, h) = (
+        (page.width() * scale).round() as u32,
+        (page.height() * scale).round() as u32,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).ok_or(usvg::Error::InvalidSize)?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    let image = RgbaImage::from_raw(w, h, pixmap.take_demultiplied()).expect("w × h RGBA pixels");
+    Ok((image, physical.then_some(96.0 * scale as f64)))
+}
+
+/// The resolution in a PNG's pHYs chunk or a JPEG's JFIF header, in px per inch.
+// ponytail: JFIF only; a JPEG with just EXIF resolution falls back to DEFAULT_WIDTH_MM.
+fn dpi(bytes: &[u8]) -> Option<f64> {
+    let be_uint = |at: usize, len: usize| {
+        let field = bytes.get(at..at + len)?;
+        Some(field.iter().fold(0u32, |n, &b| n << 8 | b as u32) as f64)
+    };
+    let dpi = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        // Chunks: length, type, data, CRC. pHYs must come before the image data.
+        let mut at = 8;
+        loop {
+            match bytes.get(at + 4..at + 8)? {
+                // Unit 1 is the metre.
+                b"pHYs" if bytes.get(at + 16) == Some(&1) => break be_uint(at + 8, 4)? * 0.0254,
+                b"IDAT" => return None,
+                _ => at += 12 + be_uint(at, 4)? as usize,
+            }
+        }
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF, 0xE0]) && bytes.get(6..11) == Some(b"JFIF\0") {
+        // Unit 1 is the inch, 2 the centimetre; 0 is only an aspect ratio.
+        match bytes.get(13)? {
+            1 => be_uint(14, 2)?,
+            2 => be_uint(14, 2)? * 2.54,
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
+    (dpi > 0.0).then_some(dpi)
 }
 
 /// Foreground = 255. Existing transparency wins; otherwise pixels close to white are background.

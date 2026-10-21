@@ -4,11 +4,13 @@ import { useTranslation } from "react-i18next";
 import PieceEditor from "./PieceEditor";
 import { listLibrary, type PieceView } from "./library";
 
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/svg+xml"];
+
 export default function LibraryView() {
   const { t } = useTranslation("library");
   const [pieces, setPieces] = useState<PieceView[]>([]);
   const [error, setError] = useState<string>();
-  const [importing, setImporting] = useState<Uint8Array<ArrayBuffer>>();
+  const [importing, setImporting] = useState<{ bytes: Uint8Array<ArrayBuffer>; type: string }>();
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -16,7 +18,8 @@ export default function LibraryView() {
   }, []);
 
   const open = async (file: File | undefined) => {
-    if (file?.type === "image/png") setImporting(new Uint8Array(await file.arrayBuffer()));
+    if (file && IMAGE_TYPES.includes(file.type))
+      setImporting({ bytes: new Uint8Array(await file.arrayBuffer()), type: file.type });
   };
 
   const onDrop = (e: DragEvent) => {
@@ -43,7 +46,7 @@ export default function LibraryView() {
         <input
           ref={fileInput}
           type="file"
-          accept="image/png"
+          accept={IMAGE_TYPES.join(",")}
           hidden
           onChange={(e) => {
             void open(e.target.files?.[0]);
@@ -81,7 +84,8 @@ export default function LibraryView() {
 
       {importing && (
         <PieceEditor
-          image={importing}
+          image={importing.bytes}
+          type={importing.type}
           onClose={() => setImporting(undefined)}
           onAdded={(piece) => {
             setPieces((pieces) => [...pieces, piece]);

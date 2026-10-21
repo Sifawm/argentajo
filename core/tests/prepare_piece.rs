@@ -5,6 +5,11 @@
 //! - `ring.png`: 200×200 px, white; a blue ring, outer r=80 and inner r=35, at the centre.
 //! - `flower_with_speck.png`: the flower plus a 3×3 px dark speck at (11..13, 11..13).
 //! - `two_parts.png`: 220×120 px, white; separate discs r=40 at (60,60) and r=20 at (170,60).
+//! - `flower_on_white.jpg`: the flower as a JPEG, 254 dpi in its JFIF header (10 px/mm).
+//! - `ring_254dpi.png`: the ring with a pHYs chunk of 254 dpi (10 px/mm).
+//! - `ring.svg`: the ring as a vector on a transparent background, 200×200 user units declared as
+//!   20 × 20 mm, so the ring is 16 mm across.
+//! - `two_parts_rotated.jpg`: `two_parts.png` stored as is, with EXIF orientation 6 (rotate 90° clockwise).
 
 use argentajo_core::piece::{Piece, PrepareError, PrepareOptions, RealSize, prepare_piece};
 use image::{ImageFormat, Rgba, RgbaImage};
@@ -24,7 +29,7 @@ fn prepare(name: &str, options: PrepareOptions) -> Piece {
 
 fn width(mm: f64) -> PrepareOptions {
     PrepareOptions {
-        size: RealSize::Width(mm),
+        size: Some(RealSize::Width(mm)),
         ..Default::default()
     }
 }
@@ -95,7 +100,7 @@ fn the_other_side_follows_the_proportions() {
     let by_height = prepare(
         "flower_on_white.png",
         PrepareOptions {
-            size: RealSize::Height(27.77),
+            size: Some(RealSize::Height(27.77)),
             ..Default::default()
         },
     );
@@ -357,4 +362,110 @@ fn edits_of_another_size_are_an_error() {
         prepare_piece(&fixture("two_parts.png"), &options),
         Err(PrepareError::EditsSize)
     ));
+}
+
+#[test]
+fn a_jpg_is_prepared_like_a_png() {
+    let piece = prepare("flower_on_white.jpg", width(30.0));
+
+    let [w, h] = piece.size_px;
+    assert_near(w as f64, 180.0, 2.0);
+    assert_near(h as f64, 166.6, 2.0);
+    assert_eq!(alpha_at(&piece, 0, 0), 0, "the paper is removed");
+    only_contour(&piece);
+}
+
+#[test]
+fn a_jpg_is_turned_upright_by_its_exif_orientation() {
+    // The two discs side by side (170 × 80 px) end up one above the other.
+    let piece = prepare("two_parts_rotated.jpg", width(8.0));
+
+    assert_near(piece.size_px[0] as f64, 80.0, 2.0);
+    assert_near(piece.size_px[1] as f64, 170.0, 2.0);
+}
+
+#[test]
+fn an_svg_on_a_transparent_background_yields_its_silhouette() {
+    let piece = prepare("ring.svg", width(16.0));
+    let [w, h] = piece.size_px;
+
+    assert_eq!(alpha_at(&piece, w / 2, h / 2), 0, "the hole stays visible");
+    assert!(
+        contains(only_contour(&piece), [8.0, 8.0]),
+        "the hole is filled for nesting"
+    );
+    assert_near(
+        polygon_area(only_contour(&piece)),
+        std::f64::consts::PI * 8.0 * 8.0,
+        3.0,
+    );
+}
+
+#[test]
+fn the_file_dpi_sets_the_initial_real_size() {
+    let svg = prepare("ring.svg", PrepareOptions::default());
+    assert_near(svg.size_mm[0], 16.0, 0.2);
+    assert_near(svg.size_mm[1], 16.0, 0.2);
+
+    let png = prepare("ring_254dpi.png", PrepareOptions::default());
+    assert_near(png.size_mm[0], 16.0, 0.2);
+
+    // 180 px at 10 px/mm.
+    let jpg = prepare("flower_on_white.jpg", PrepareOptions::default());
+    assert_near(jpg.size_mm[0], 18.0, 0.2);
+}
+
+#[test]
+fn without_dpi_the_initial_real_size_is_20_mm_wide() {
+    let piece = prepare("flower_on_white.png", PrepareOptions::default());
+    assert_eq!(piece.size_mm[0], 20.0);
+}
+
+#[test]
+fn the_real_size_set_by_the_jeweller_overrides_the_file_dpi() {
+    let piece = prepare("ring_254dpi.png", width(40.0));
+    assert_eq!(piece.size_mm[0], 40.0);
+}
+
+#[test]
+fn enlarging_past_150_ppi_warns_of_low_resolution() {
+    // ~180 px wide, so ~30.5 mm at 150 ppi.
+    let px = prepare("flower_on_white.png", width(30.0)).size_px[0] as f64;
+    let at_150_ppi = px / 150.0 * 25.4;
+
+    let sharp = prepare("flower_on_white.png", width(at_150_ppi - 0.1));
+    assert!(!sharp.low_resolution);
+    assert!(sharp.ppi > 150.0);
+
+    let blurry = prepare("flower_on_white.png", width(at_150_ppi + 0.1));
+    assert!(blurry.low_resolution);
+    assert_near(blurry.ppi, px / ((at_150_ppi + 0.1) / 25.4), 0.01);
+}
+
+#[test]
+fn an_svg_is_sharp_at_any_jewellery_size() {
+    assert!(!prepare("ring.svg", width(150.0)).low_resolution);
+}
+
+#[test]
+fn a_small_svg_motif_on_a_large_page_stays_sharp() {
+    // A 16 mm ring in the corner of a 200 mm page, as drawn on an A4-sized document.
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="200mm" height="200mm" viewBox="0 0 2000 2000">
+        <circle cx="100" cy="100" r="57.5" fill="none" stroke="#1e3a8a" stroke-width="45"/>
+    </svg>"##;
+    let piece = prepare_piece(svg, &PrepareOptions::default()).unwrap();
+
+    assert_near(piece.size_mm[0], 16.0, 0.2);
+    assert!(piece.ppi > 300.0, "only {} ppi", piece.ppi);
+}
+
+#[test]
+fn an_svg_without_physical_units_has_no_dpi() {
+    // A 24-unit icon: no width in mm, cm, in, pt or pc, so no real size to take from it.
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10" fill="#1e3a8a"/>
+    </svg>"##;
+    let piece = prepare_piece(svg, &PrepareOptions::default()).unwrap();
+
+    assert_eq!(piece.size_mm[0], 20.0);
 }

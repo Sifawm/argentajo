@@ -1,9 +1,10 @@
 {
   "title": "Library",
-  "import": "Import PNG",
-  "empty": "No pieces yet. Import a PNG or drop one here.",
+  "import": "Import image",
+  "empty": "No pieces yet. Import a PNG, JPG or SVG, or drop one here.",
   "sizeMm": "{{w, number(maximumFractionDigits: 1)}} × {{h, number(maximumFractionDigits: 1)}} mm",
   "sizePx": "{{w}} × {{h}} px",
+  "lowResolution": "Low resolution for this size ({{ppi}} ppi): the print may be blurry and the outline inaccurate. Make the piece smaller or use a larger image.",
   "editorTitle": "Prepare piece",
   "editorDescription": "Adjust the background removal, set the real size and choose how the piece may be placed.",
   "silhouette": "Cleaned piece with its detected silhouette",

@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 /** Mirrors `core::piece::PrepareOptions`. Sizes are in mm. */
 export interface PrepareOptions {
   tolerance: number;
-  size: { width: number } | { height: number };
+  /** `null` takes it from the file's resolution (DPI), or 20 mm wide without one. */
+  size: { width: number } | { height: number } | null;
   allowRotation: boolean;
   allowMirror: boolean;
 }
@@ -15,7 +16,13 @@ export interface PieceView {
   sizePx: [number, number];
   /** Top-left of the crop in the source image, in px. */
   offsetPx: [number, number];
+  /** Size of the decoded source image (SVGs rasterised): what `offsetPx` and the edits refer to. */
+  sourcePx: [number, number];
   sizeMm: [number, number];
+  /** Effective resolution at the real size, in px per inch. */
+  ppi: number;
+  /** Too few ppi for a sharp print and an accurate outline. */
+  lowResolution: boolean;
   /** One outer silhouette per Part, in mm, origin top-left, y down. */
   contours: [number, number][][];
   allowRotation: boolean;

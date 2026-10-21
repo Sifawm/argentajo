@@ -1,4 +1,4 @@
-import { Brush, Eraser } from "lucide-react";
+import { Brush, Eraser, TriangleAlert } from "lucide-react";
 import { Dialog, Slider, ToggleGroup } from "radix-ui";
 import { type PointerEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -18,21 +18,24 @@ const TOOL_COLOR: Record<Tool, string> = { brush: "#22c55e", eraser: "#ef4444" }
 
 interface Props {
   image: Uint8Array<ArrayBuffer>;
+  /** MIME type of `image`, so the browser can show it (SVGs need it). */
+  type: string;
   onClose: () => void;
   onAdded: (piece: PieceView) => void;
 }
 
-export default function PieceEditor({ image, onClose, onAdded }: Props) {
+export default function PieceEditor({ image, type, onClose, onAdded }: Props) {
   const { t } = useTranslation("library");
   const [tolerance, setTolerance] = useState(32);
-  // The side the jeweller typed; the other one follows the proportions.
-  const [size, setSize] = useState<{ side: Side; text: string }>({ side: "width", text: "20" });
+  // The side the jeweller typed; the other one follows the proportions. Until then, `core` takes
+  // the size from the file's DPI.
+  const [size, setSize] = useState<{ side: Side; text: string }>();
   const [allowRotation, setAllowRotation] = useState(true);
   const [allowMirror, setAllowMirror] = useState(false);
   const [preview, setPreview] = useState<PieceView>();
   const [error, setError] = useState<string>();
   const [saving, setSaving] = useState(false);
-  const [source, setSource] = useState<{ url: string; w: number; h: number }>();
+  const [sourceUrl, setSourceUrl] = useState<string>();
   const [tool, setTool] = useState<Tool>();
   const [brushSize, setBrushSize] = useState(20);
   const [edits, setEdits] = useState<Edits>();
@@ -42,33 +45,20 @@ export default function PieceEditor({ image, onClose, onAdded }: Props) {
   const painted = useRef(false);
 
   useEffect(() => {
-    let stale = false;
-    const url = URL.createObjectURL(new Blob([image]));
-    const img = new Image();
-    img.src = url;
-    img.decode().then(
-      () => !stale && setSource({ url, w: img.naturalWidth, h: img.naturalHeight }),
-      (e) => !stale && setError(String(e)),
-    );
-    return () => {
-      stale = true;
-      URL.revokeObjectURL(url);
-    };
-  }, [image]);
+    const url = URL.createObjectURL(new Blob([image], { type }));
+    setSourceUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [image, type]);
 
-  const mm = Number(size.text);
-  const options = useMemo<PrepareOptions | undefined>(
-    () =>
-      mm > 0
-        ? {
-            tolerance,
-            size: size.side === "width" ? { width: mm } : { height: mm },
-            allowRotation,
-            allowMirror,
-          }
-        : undefined,
-    [tolerance, size.side, mm, allowRotation, allowMirror],
-  );
+  const side = size?.side;
+  const mm = Number(size?.text);
+  const options = useMemo<PrepareOptions | undefined>(() => {
+    if (side && !(mm > 0)) return undefined;
+    const realSize = side === "width" ? { width: mm } : side === "height" ? { height: mm } : null;
+    return { tolerance, size: realSize, allowRotation, allowMirror };
+  }, [tolerance, side, mm, allowRotation, allowMirror]);
+  // Decoded by `core` (SVGs rasterised), so the overlay and the edits share its pixel grid.
+  const [sourceW, sourceH] = preview?.sourcePx ?? [];
 
   // Re-prepare live, debounced so dragging the slider doesn't queue up a run per step.
   useEffect(() => {
@@ -177,15 +167,15 @@ export default function PieceEditor({ image, onClose, onAdded }: Props) {
     </ToggleGroup.Item>
   );
 
-  const sizeInput = (side: Side, index: 0 | 1) => (
+  const sizeInput = (inputSide: Side, index: 0 | 1) => (
     <label className="flex flex-col gap-1 text-sm">
-      {t(side)}
+      {t(inputSide)}
       <input
         type="number"
         min="0"
         step="0.1"
-        value={size.side === side ? size.text : (preview?.sizeMm[index].toFixed(2) ?? "")}
-        onChange={(e) => setSize({ side, text: e.target.value })}
+        value={size?.side === inputSide ? size.text : (preview?.sizeMm[index].toFixed(2) ?? "")}
+        onChange={(e) => setSize({ side: inputSide, text: e.target.value })}
         className="w-28 rounded-md border border-zinc-300 px-2 py-1"
       />
     </label>
@@ -201,10 +191,10 @@ export default function PieceEditor({ image, onClose, onAdded }: Props) {
 
           <div className="flex min-h-0 flex-1 gap-6">
             <div className="checkerboard relative min-w-0 flex-1 rounded-md">
-              {source && (
+              {sourceUrl && preview && (
                 <>
                   <svg
-                    viewBox={`0 0 ${source.w} ${source.h}`}
+                    viewBox={`0 0 ${sourceW} ${sourceH}`}
                     className={`absolute inset-4 size-[calc(100%-2rem)] touch-none overflow-visible ${tool ? "cursor-crosshair" : ""}`}
                     role="img"
                     aria-label={t("silhouette")}
@@ -218,34 +208,32 @@ export default function PieceEditor({ image, onClose, onAdded }: Props) {
                     onPointerCancel={endStroke}
                   >
                     {/* Faded, so what was removed as background can still be brushed back. */}
-                    <image href={source.url} width={source.w} height={source.h} opacity={0.25} />
-                    {preview && (
-                      <g
-                        transform={`translate(${preview.offsetPx[0]} ${preview.offsetPx[1]}) scale(${preview.sizePx[0] / preview.sizeMm[0]})`}
-                      >
-                        <image
-                          href={preview.image}
-                          width={preview.sizeMm[0]}
-                          height={preview.sizeMm[1]}
+                    <image href={sourceUrl} width={sourceW} height={sourceH} opacity={0.25} />
+                    <g
+                      transform={`translate(${preview.offsetPx[0]} ${preview.offsetPx[1]}) scale(${preview.sizePx[0] / preview.sizeMm[0]})`}
+                    >
+                      <image
+                        href={preview.image}
+                        width={preview.sizeMm[0]}
+                        height={preview.sizeMm[1]}
+                      />
+                      {preview.contours.map((contour, i) => (
+                        <polygon
+                          key={i}
+                          points={contour.map(([x, y]) => `${x},${y}`).join(" ")}
+                          fill="none"
+                          stroke="#0ea5e9"
+                          strokeWidth={2}
+                          vectorEffect="non-scaling-stroke"
                         />
-                        {preview.contours.map((contour, i) => (
-                          <polygon
-                            key={i}
-                            points={contour.map(([x, y]) => `${x},${y}`).join(" ")}
-                            fill="none"
-                            stroke="#0ea5e9"
-                            strokeWidth={2}
-                            vectorEffect="non-scaling-stroke"
-                          />
-                        ))}
-                      </g>
-                    )}
+                      ))}
+                    </g>
                   </svg>
                   {/* Letterboxed like the SVG above, so both share the source pixel grid. */}
                   <canvas
                     ref={canvas}
-                    width={source.w}
-                    height={source.h}
+                    width={sourceW}
+                    height={sourceH}
                     className="pointer-events-none absolute inset-4 size-[calc(100%-2rem)] object-contain opacity-40"
                   />
                 </>
@@ -287,6 +275,12 @@ export default function PieceEditor({ image, onClose, onAdded }: Props) {
                 <p className="text-sm text-zinc-600">
                   {t("sizeMm", { w: preview.sizeMm[0], h: preview.sizeMm[1] })} ·{" "}
                   {t("sizePx", { w: preview.sizePx[0], h: preview.sizePx[1] })}
+                </p>
+              )}
+              {preview?.lowResolution && (
+                <p role="status" className="flex gap-2 text-sm text-amber-700">
+                  <TriangleAlert aria-hidden className="size-4 shrink-0" />
+                  {t("lowResolution", { ppi: Math.round(preview.ppi) })}
                 </p>
               )}
 

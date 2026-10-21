@@ -1,9 +1,10 @@
 {
   "title": "Biblioteca",
-  "import": "Importar PNG",
-  "empty": "Aún no hay piezas. Importa un PNG o suéltalo aquí.",
+  "import": "Importar imagen",
+  "empty": "Aún no hay piezas. Importa un PNG, JPG o SVG, o suéltalo aquí.",
   "sizeMm": "{{w, number(maximumFractionDigits: 1)}} × {{h, number(maximumFractionDigits: 1)}} mm",
   "sizePx": "{{w}} × {{h}} px",
+  "lowResolution": "Resolución baja para este tamaño ({{ppi}} ppi): la impresión puede salir borrosa y el contorno impreciso. Reduce la pieza o usa una imagen más grande.",
   "editorTitle": "Preparar pieza",
   "editorDescription": "Ajusta la eliminación del fondo, fija el tamaño real y elige cómo puede colocarse la pieza.",
   "silhouette": "Pieza limpia con su silueta detectada",
