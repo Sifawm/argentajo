@@ -8,7 +8,7 @@ export default function LibraryView() {
   const { t } = useTranslation("library");
   const [pieces, setPieces] = useState<PieceView[]>([]);
   const [error, setError] = useState<string>();
-  const [importing, setImporting] = useState<Uint8Array>();
+  const [importing, setImporting] = useState<Uint8Array<ArrayBuffer>>();
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {

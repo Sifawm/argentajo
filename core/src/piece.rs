@@ -1,6 +1,6 @@
 //! Piece preparation: image bytes → background mask → cleaned image, real size and nesting contours.
 
-use image::{GenericImageView, GrayImage, ImageFormat, Luma, RgbaImage};
+use image::{GenericImageView, GrayImage, ImageFormat, Luma, Rgba, RgbaImage};
 use imageproc::contours::{BorderType, find_contours};
 use imageproc::geometry::{approximate_polygon_dp, contour_area};
 use imageproc::region_labelling::{Connectivity, connected_components};
@@ -32,6 +32,11 @@ pub struct PrepareOptions {
     pub size: RealSize,
     pub allow_rotation: bool,
     pub allow_mirror: bool,
+    /// Manual brush/eraser edits: a PNG the size of the source image. Transparent pixels keep the
+    /// automatic mask; painted ones are forced into the piece when green outweighs red (brush), out
+    /// of it otherwise (eraser).
+    #[serde(skip)]
+    pub edits: Option<Vec<u8>>,
 }
 
 impl Default for PrepareOptions {
@@ -41,6 +46,7 @@ impl Default for PrepareOptions {
             size: RealSize::Width(20.0),
             allow_rotation: true,
             allow_mirror: false,
+            edits: None,
         }
     }
 }
@@ -53,6 +59,9 @@ pub struct Piece {
     #[serde(skip)]
     pub png: Vec<u8>,
     pub size_px: [u32; 2],
+    /// Top-left of the crop in the source image, in px.
+    #[serde(default)]
+    pub offset_px: [u32; 2],
     pub size_mm: [f64; 2],
     /// One outer silhouette per Part, largest first; interior holes are filled. Parts are cut
     /// separately but belong together: nesting places all of them or none.
@@ -66,6 +75,8 @@ pub enum PrepareError {
     Image(image::ImageError),
     /// Everything was removed as background.
     Empty,
+    /// The manual edits are not the size of the source image.
+    EditsSize,
 }
 
 impl std::fmt::Display for PrepareError {
@@ -76,6 +87,7 @@ impl std::fmt::Display for PrepareError {
                 f,
                 "no motif found: the whole image was removed as background"
             ),
+            Self::EditsSize => write!(f, "the manual edits do not match the image size"),
         }
     }
 }
@@ -91,6 +103,10 @@ impl From<image::ImageError> for PrepareError {
 pub fn prepare_piece(bytes: &[u8], options: &PrepareOptions) -> Result<Piece, PrepareError> {
     let mut image = image::load_from_memory(bytes)?.to_rgba8();
     let mut mask = mask(&image, options.tolerance);
+    if let Some(edits) = &options.edits {
+        apply_edits(&mut mask, &image::load_from_memory(edits)?.to_rgba8())?;
+    }
+    // After the edits, so whatever an eraser stroke leaves behind goes too.
     drop_specks(&mut mask);
     let (x0, y0, w, h) = bounding_box(&mask).ok_or(PrepareError::Empty)?;
 
@@ -111,6 +127,7 @@ pub fn prepare_piece(bytes: &[u8], options: &PrepareOptions) -> Result<Piece, Pr
     Ok(Piece {
         png,
         size_px: [w, h],
+        offset_px: [x0, y0],
         size_mm,
         contours: contours(&mask.view(x0, y0, w, h).to_image(), mm_per_px),
         allow_rotation: options.allow_rotation,
@@ -153,6 +170,18 @@ fn drop_specks(mask: &mut GrayImage) {
             pixel[0] = 0;
         }
     }
+}
+
+fn apply_edits(mask: &mut GrayImage, edits: &RgbaImage) -> Result<(), PrepareError> {
+    if edits.dimensions() != mask.dimensions() {
+        return Err(PrepareError::EditsSize);
+    }
+    for (pixel, &Rgba([r, g, _, a])) in mask.pixels_mut().zip(edits.pixels()) {
+        if a >= 128 {
+            pixel[0] = if g > r { 255 } else { 0 };
+        }
+    }
+    Ok(())
 }
 
 /// Each blob's outer border, simplified, in mm, largest first. Following only outer borders fills the holes.

@@ -7,10 +7,19 @@
 //! - `two_parts.png`: 220×120 px, white; separate discs r=40 at (60,60) and r=20 at (170,60).
 
 use argentajo_core::piece::{Piece, PrepareError, PrepareOptions, RealSize, prepare_piece};
+use image::{ImageFormat, Rgba, RgbaImage};
+use std::io::Cursor;
 
-fn prepare(fixture: &str, options: PrepareOptions) -> Piece {
-    let path = format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"));
-    prepare_piece(&std::fs::read(path).unwrap(), &options).unwrap()
+fn fixture(name: &str) -> Vec<u8> {
+    std::fs::read(format!(
+        "{}/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+fn prepare(name: &str, options: PrepareOptions) -> Piece {
+    prepare_piece(&fixture(name), &options).unwrap()
 }
 
 fn width(mm: f64) -> PrepareOptions {
@@ -211,16 +220,12 @@ fn pieces_may_rotate_but_not_mirror_by_default() {
 
 #[test]
 fn an_image_removed_entirely_is_an_error() {
-    let path = format!(
-        "{}/tests/fixtures/flower_on_white.png",
-        env!("CARGO_MANIFEST_DIR")
-    );
     let options = PrepareOptions {
         tolerance: 255,
         ..Default::default()
     };
     assert!(matches!(
-        prepare_piece(&std::fs::read(path).unwrap(), &options),
+        prepare_piece(&fixture("flower_on_white.png"), &options),
         Err(PrepareError::Empty)
     ));
 }
@@ -256,4 +261,100 @@ fn separate_parts_each_keep_their_own_contour() {
         !contains(big, [10.0, 4.0]) && !contains(small, [10.0, 4.0]),
         "the gap between them stays free"
     );
+}
+
+const BRUSH: Rgba<u8> = Rgba([0, 255, 0, 255]);
+const ERASER: Rgba<u8> = Rgba([255, 0, 0, 255]);
+
+/// Manual edits over a `w`×`h` source as a PNG: each `(tool, [x0, y0, x1, y1])` paints the
+/// rectangle x0..x1, y0..y1.
+fn edits(w: u32, h: u32, strokes: &[(Rgba<u8>, [u32; 4])]) -> Vec<u8> {
+    let mut image = RgbaImage::new(w, h);
+    for &(tool, [x0, y0, x1, y1]) in strokes {
+        for x in x0..x1 {
+            for y in y0..y1 {
+                image.put_pixel(x, y, tool);
+            }
+        }
+    }
+    let mut png = Vec::new();
+    image
+        .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+        .unwrap();
+    png
+}
+
+#[test]
+fn erasing_removes_an_area_from_the_contour_and_the_image() {
+    // Erase the small disc (r=20 at 170,60): only the big one (x 20..100) remains.
+    let piece = prepare(
+        "two_parts.png",
+        PrepareOptions {
+            edits: Some(edits(220, 120, &[(ERASER, [145, 35, 195, 85])])),
+            ..width(8.0)
+        },
+    );
+
+    assert_near(piece.size_px[0] as f64, 80.0, 2.0);
+    assert_eq!(piece.offset_px, [20, 20], "the crop starts at the big disc");
+    assert_near(
+        polygon_area(only_contour(&piece)),
+        std::f64::consts::PI * 4.0 * 4.0,
+        1.5,
+    );
+}
+
+#[test]
+fn brushing_adds_a_missed_area_to_the_contour_and_the_image() {
+    // Brush a bridge x 95..155, y 55..65 joining the two discs into one part. The crop starts at
+    // (20,20) and is 170 px wide; at 17 mm that is 0.1 mm/px.
+    let piece = prepare(
+        "two_parts.png",
+        PrepareOptions {
+            edits: Some(edits(220, 120, &[(BRUSH, [95, 55, 155, 65])])),
+            ..width(17.0)
+        },
+    );
+
+    assert!(
+        contains(only_contour(&piece), [10.5, 4.0]),
+        "the bridge (centre 125,60 px) is enclosed"
+    );
+    assert_eq!(alpha_at(&piece, 105, 40), 255, "the bridge is kept");
+}
+
+#[test]
+fn what_erasing_leaves_behind_is_dropped_as_specks() {
+    // Erase the small disc (r=20 at 170,60) around a 3×3 px remnant at (169..172, 59..62).
+    let piece = prepare(
+        "two_parts.png",
+        PrepareOptions {
+            edits: Some(edits(
+                220,
+                120,
+                &[
+                    (ERASER, [145, 35, 169, 85]),
+                    (ERASER, [172, 35, 195, 85]),
+                    (ERASER, [169, 35, 172, 59]),
+                    (ERASER, [169, 62, 172, 85]),
+                ],
+            )),
+            ..width(8.0)
+        },
+    );
+
+    only_contour(&piece);
+    assert_near(piece.size_px[0] as f64, 80.0, 2.0);
+}
+
+#[test]
+fn edits_of_another_size_are_an_error() {
+    let options = PrepareOptions {
+        edits: Some(edits(100, 100, &[])),
+        ..Default::default()
+    };
+    assert!(matches!(
+        prepare_piece(&fixture("two_parts.png"), &options),
+        Err(PrepareError::EditsSize)
+    ));
 }

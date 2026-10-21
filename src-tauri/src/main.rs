@@ -34,17 +34,26 @@ impl PieceView {
 
 /// Raw image bytes as the body, `PrepareOptions` as JSON in the `options` header,
 /// so the slider can re-prepare without serialising the image as a JSON array.
+/// Manual edits, if any, are appended to the body; `edits-length` says how many bytes they take.
 fn prepare(request: &Request) -> Result<Piece, String> {
     let InvokeBody::Raw(bytes) = request.body() else {
         return Err("expected the image bytes as the request body".into());
     };
-    let options = request
-        .headers()
-        .get("options")
-        .ok_or("missing options header")?;
-    let options: PrepareOptions =
-        serde_json::from_slice(options.as_bytes()).map_err(|e| e.to_string())?;
-    prepare_piece(bytes, &options).map_err(|e| e.to_string())
+    let header = |name| request.headers().get(name).map(|v| v.as_bytes());
+    let mut options: PrepareOptions =
+        serde_json::from_slice(header("options").ok_or("missing options header")?)
+            .map_err(|e| e.to_string())?;
+    let edits_length = match header("edits-length") {
+        Some(length) => std::str::from_utf8(length)
+            .ok()
+            .and_then(|length| length.parse().ok())
+            .filter(|&length| length <= bytes.len())
+            .ok_or("invalid edits-length header")?,
+        None => 0,
+    };
+    let (image, edits) = bytes.split_at(bytes.len() - edits_length);
+    options.edits = (edits_length > 0).then(|| edits.to_vec());
+    prepare_piece(image, &options).map_err(|e| e.to_string())
 }
 
 // `async`: sync commands run on the main thread and would freeze the window while preparing.
