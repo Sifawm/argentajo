@@ -41,7 +41,7 @@ import {
   toJobRequest,
 } from "./job";
 import type { PieceView } from "./library";
-import { sizeDimensions } from "./library";
+import { sizeLabel } from "./library";
 import {
   formatSize,
   fromUnit,
@@ -286,15 +286,6 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     />
   );
 
-  const sizeLabel = (piece: PieceView, sizeId: string) => {
-    const size = piece.sizes.find((s) => s.id === sizeId);
-    if (!size) return "";
-    const dims = sizeDimensions(piece, sizeId);
-    return `${size.name} · ${dims ? formatSize(t, dims, unit) : ""}`;
-  };
-
-  const defaultSizeLabel = (piece: PieceView) => sizeLabel(piece, piece.sizes[0]?.id ?? "");
-
   const changeSize = (item: Item, newSizeId: string) => {
     if (item.size === newSizeId) return;
     setItems((items) =>
@@ -312,7 +303,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
       {
         piece,
         size,
-        label: sizeLabel(piece, size.id),
+        label: sizeLabel(piece, size.id, unit, t),
         quantity,
         fill: item.quantity === "fill",
         placed: result.view.placed[i],
@@ -486,7 +477,6 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
             )}
             {jobItems.map((item) => {
               const piece = byId.get(item.id)!;
-              const fromJobFile = jobPieces.some((p) => p.id === item.id);
               return (
                 <li
                   key={`${item.id}:${item.size}`}
@@ -496,13 +486,13 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
                     {thumbnail(piece)}
                     <select
                       value={item.size}
-                      disabled={fromJobFile}
+                      disabled={item.fixed}
                       onChange={(e) => changeSize(item, e.target.value)}
                       className="min-w-0 flex-1 rounded-md border border-zinc-300 px-2 py-1 text-xs disabled:opacity-60"
                     >
                       {piece.sizes.map((size) => (
                         <option key={size.id} value={size.id}>
-                          {sizeLabel(piece, size.id)}
+                          {sizeLabel(piece, size.id, unit, t)}
                         </option>
                       ))}
                     </select>
@@ -554,7 +544,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
                   </div>
                   <button
                     type="button"
-                    disabled={fromJobFile || !addAnotherSize(items, piece)}
+                    disabled={item.fixed || !addAnotherSize(items, piece)}
                     onClick={() => {
                       const next = addAnotherSize(items, piece);
                       if (next) setItems(next);
@@ -576,8 +566,10 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
                   draggable
                   onDragStart={(e) => e.dataTransfer.setData(DRAG_TYPE, piece.id!)}
                   onClick={() => add(piece.id!)}
-                  aria-label={t("addPiece", { size: defaultSizeLabel(piece) })}
-                  title={defaultSizeLabel(piece)}
+                  aria-label={t("addPiece", {
+                    size: sizeLabel(piece, piece.sizes[0]?.id ?? "", unit, t),
+                  })}
+                  title={sizeLabel(piece, piece.sizes[0]?.id ?? "", unit, t)}
                   className="w-full rounded bg-white p-1 shadow-sm"
                 >
                   {thumbnail(piece, "aspect-square w-full")}

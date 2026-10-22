@@ -44,8 +44,8 @@ const request = (sizeMm: [number, number]): JobRequest => ({
   edgeMarginMm: 2,
   timeLimitS: 30,
   items: [
-    { id: "job-0", size_id: "normal", quantity: { fixed: 3 } },
-    { id: "job-1", size_id: "large", quantity: "fill" },
+    { id: "job-0", size_id: "normal", quantity: { fixed: 3 }, fixed: false },
+    { id: "job-1", size_id: "large", quantity: "fill", fixed: false },
   ],
 });
 
@@ -79,8 +79,8 @@ describe("fromJobRequest", () => {
 
   it("gives fill items a quantity of 1 for when they're switched back", () => {
     expect(fromJobRequest(request([210, 297])).items).toEqual([
-      { id: "job-0", size: "normal", quantity: 3, fill: false },
-      { id: "job-1", size: "large", quantity: 1, fill: true },
+      { id: "job-0", size: "normal", quantity: 3, fill: false, fixed: false },
+      { id: "job-1", size: "large", quantity: 1, fill: true, fixed: false },
     ]);
   });
 });

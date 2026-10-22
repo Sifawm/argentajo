@@ -5,7 +5,7 @@ use argentajo_core::job_file::{SavedJob, open_job, save_job};
 use argentajo_core::nest::Quantity::{Fill, Fixed};
 use argentajo_core::nest::{Job, JobItem, Paper, nest};
 use argentajo_core::output::OutputOptions;
-use argentajo_core::piece::{NORMAL_SIZE_ID, PrepareOptions, RealSize, SizeInput, prepare_piece};
+use argentajo_core::piece::{NORMAL_SIZE_ID, PrepareOptions, RealSize, SizeInput, piece_at_size, prepare_piece};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::Duration;
 
@@ -173,12 +173,12 @@ fn a_job_with_pieces_at_different_sizes_round_trips() {
         time_limit: Duration::from_millis(500),
         items: vec![
             JobItem {
-                piece: piece.clone(),
+                piece: piece_at_size(&piece, "small").unwrap(),
                 size_id: "small".into(),
                 quantity: Fixed(1),
             },
             JobItem {
-                piece: piece.clone(),
+                piece: piece_at_size(&piece, "large").unwrap(),
                 size_id: "large".into(),
                 quantity: Fixed(1),
             },
@@ -189,7 +189,12 @@ fn a_job_with_pieces_at_different_sizes_round_trips() {
         layout: None,
         output: OutputOptions::default(),
     };
-    assert_eq!(open_job(save_job(&saved).as_bytes()).unwrap(), saved);
+    let opened = open_job(save_job(&saved).as_bytes()).unwrap();
+    assert_eq!(opened, saved);
+    for item in &opened.job.items {
+        assert_eq!(item.piece.sizes.len(), 1);
+        assert_eq!(item.piece.sizes[0].id, item.size_id);
+    }
 }
 
 #[test]

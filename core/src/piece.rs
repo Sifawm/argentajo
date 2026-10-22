@@ -46,6 +46,22 @@ pub enum RealSize {
 /// Well-known id for the backward-compatible Normal size.
 pub const NORMAL_SIZE_ID: &str = "normal";
 
+fn normal_size_input(measure: Option<RealSize>) -> SizeInput {
+    SizeInput {
+        id: NORMAL_SIZE_ID.into(),
+        name: "Normal".into(),
+        measure,
+    }
+}
+
+fn normal_size(mm: f64) -> Size {
+    Size {
+        id: NORMAL_SIZE_ID.into(),
+        name: "Normal".into(),
+        measure: RealSize::Width(mm),
+    }
+}
+
 /// A named real size of a Piece. The first Size is the Default size.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,11 +125,7 @@ impl Default for PrepareOptionsData {
 impl From<PrepareOptionsData> for PrepareOptions {
     fn from(data: PrepareOptionsData) -> Self {
         let sizes = if data.sizes.is_empty() {
-            vec![SizeInput {
-                id: NORMAL_SIZE_ID.into(),
-                name: "Normal".into(),
-                measure: data.size,
-            }]
+            vec![normal_size_input(data.size)]
         } else {
             data.sizes
         };
@@ -166,11 +178,7 @@ impl From<PieceData> for Piece {
     fn from(data: PieceData) -> Self {
         let mut sizes = data.sizes;
         if sizes.is_empty() {
-            sizes = vec![Size {
-                id: NORMAL_SIZE_ID.into(),
-                name: "Normal".into(),
-                measure: RealSize::Width(data.size_mm[0]),
-            }];
+            sizes = vec![normal_size(data.size_mm[0])];
         }
         Self {
             png: data.png,
@@ -318,11 +326,7 @@ pub fn prepare_piece(bytes: &[u8], options: &PrepareOptions) -> Result<Piece, Pr
         })
         .collect();
     if piece.sizes.is_empty() {
-        piece.sizes = vec![Size {
-            id: NORMAL_SIZE_ID.into(),
-            name: "Normal".into(),
-            measure: RealSize::Width(piece.size_mm[0]),
-        }];
+        piece.sizes = vec![normal_size(piece.size_mm[0])];
     }
     Ok(piece)
 }
@@ -345,11 +349,7 @@ pub fn split_piece(bytes: &[u8], options: &PrepareOptions) -> Result<Vec<Piece>,
                 }])
             });
             let mut piece = cut_out(&image, &mask, mm_per_px, options)?;
-            piece.sizes = vec![Size {
-                id: NORMAL_SIZE_ID.into(),
-                name: "Normal".into(),
-                measure: RealSize::Width(piece.size_mm[0]),
-            }];
+            piece.sizes = vec![normal_size(piece.size_mm[0])];
             Ok(piece)
         })
         .collect()
