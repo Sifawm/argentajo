@@ -4,8 +4,9 @@
 
 use argentajo_core::nest::Quantity::{Fill, Fixed};
 use argentajo_core::nest::{
-    Job, JobItem, Layout, NestError, Paper, Placement, Quantity, SheetLayout, nest, render_page,
+    Job, JobItem, Layout, NestError, Paper, Placement, Quantity, SheetLayout, nest,
 };
+use argentajo_core::output::{OutputOptions, render_page};
 use argentajo_core::piece::{Piece, PrepareOptions, RealSize, prepare_piece};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -442,7 +443,7 @@ fn renders_the_page_in_mm_with_every_placed_part() {
     let layout = nest_valid(&job, 1);
     assert_eq!(layout.sheets[0].placements.len(), 6);
 
-    let svg = render_page(&job, &layout, 0);
+    let svg = render_page(&job, &layout, 0, &OutputOptions::default());
     let tree = resvg::usvg::Tree::from_str(&svg, &Default::default()).unwrap();
     let px_per_mm = 96.0 / 25.4;
     assert!((tree.size().width() - 210.0 * px_per_mm).abs() < 0.01);
@@ -664,11 +665,23 @@ fn sheets_go_in_rows_inside_the_margin_and_overflow_onto_new_pages() {
 
     // Each page shows only its own Sheets' outlines.
     let outlines = |page| {
-        render_page(&job, &layout, page)
+        render_page(&job, &layout, page, &OutputOptions::default())
             .matches(r#"stroke="black""#)
             .count()
     };
     assert_eq!((outlines(0), outlines(1)), (6, 1));
+}
+
+#[test]
+fn sheets_leave_room_for_the_verification_square() {
+    // 200 × 287 mm inside the printer margin; the square takes its bottom-right 10 mm, 5 mm apart.
+    let over_it = job([200.0, 287.0], vec![]);
+    assert!(matches!(
+        try_nest(&over_it, 1),
+        Err(NestError::SheetOffPaper)
+    ));
+    nest_valid(&job([200.0, 272.0], vec![]), 1);
+    nest_valid(&job([185.0, 287.0], vec![]), 1);
 }
 
 #[test]

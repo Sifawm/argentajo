@@ -52,5 +52,12 @@
   "timeLeft_other": "{{count}} s left",
   "finishing": "Finishing the first layout…",
   "iterations_one": "{{count, number}} iteration",
-  "iterations_other": "{{count, number}} iterations"
+  "iterations_other": "{{count, number}} iterations",
+  "sheetOutline": "Sheet outlines",
+  "silhouette": "Cutting silhouettes",
+  "exportPdf": "Export PDF",
+  "exportFailed": "Could not export the PDF: {{error}}",
+  "exported": "PDF saved",
+  "printAtActualSize": "Print it at 100 % (actual size): never “fit to page” or any other scaling. Then check with a ruler that the black square measures exactly 1 × 1 cm.",
+  "ok": "OK"
 }

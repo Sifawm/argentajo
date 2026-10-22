@@ -25,6 +25,14 @@ export interface JobRequest {
   items: { id: string; quantity: { fixed: number } | "fill" }[];
 }
 
+/** Mirrors `core::output::OutputOptions`: what's printed besides the pieces and the 1 cm square. */
+export interface OutputOptions {
+  sheetOutline: boolean;
+  silhouette: boolean;
+}
+
+export const DEFAULT_OUTPUT: OutputOptions = { sheetOutline: true, silhouette: false };
+
 /** Mirrors `core::nest::Layout`, with each of its pages rendered by `core` as an SVG in mm. */
 export interface NestView {
   pages: string[];
@@ -38,10 +46,12 @@ export interface NestView {
 
 /**
  * Resolves with the best Layout once the run ends; `onProgress` gets every improved one before, and
- * `onIterations` the iterations tried so far, four times a second.
+ * `onIterations` the iterations tried so far, four times a second. Pages are rendered with `options`
+ * until `setOutputOptions` changes them.
  */
 export const nestJob = (
   job: JobRequest,
+  options: OutputOptions,
   onProgress: (view: NestView) => void,
   onIterations: (iterations: number) => void,
 ) => {
@@ -49,11 +59,23 @@ export const nestJob = (
   progress.onmessage = onProgress;
   const iterations = new Channel<number>();
   iterations.onmessage = onIterations;
-  return invoke<NestView>("nest_job", { job, onProgress: progress, onIterations: iterations });
+  return invoke<NestView>("nest_job", {
+    job,
+    options,
+    onProgress: progress,
+    onIterations: iterations,
+  });
 };
 
 /** Ends the run in progress: `nestJob` then resolves with the best Layout so far. */
 export const stopNesting = () => invoke("stop_nesting");
+
+/** Renders the latest Layout's pages again with `options`, which later ones are rendered with too. */
+export const setOutputOptions = (options: OutputOptions) =>
+  invoke<string[]>("set_output_options", { options });
+
+/** Asks where to save the latest Layout as a PDF and saves it there. False if cancelled. */
+export const exportPdf = () => invoke<boolean>("export_job_pdf");
 
 /** "My sheets": Sheet sizes saved for reuse, width × height in mm. */
 export const loadMySheets = () => invoke<Size[]>("load_my_sheets");

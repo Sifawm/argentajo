@@ -1,7 +1,8 @@
 // Prevents an additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use argentajo_core::nest::{Job, JobItem, Layout, Paper, Quantity, nest, render_page};
+use argentajo_core::nest::{Job, JobItem, Layout, Paper, Quantity, nest};
+use argentajo_core::output::{OutputOptions, export_pdf, render_page};
 use argentajo_core::piece::{Piece, PrepareOptions, prepare_piece, split_piece};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeBody, Request};
 use tauri::{Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 #[tauri::command]
 fn core_version() -> &'static str {
@@ -277,29 +279,35 @@ struct NestView {
     layout: Layout,
 }
 
-impl NestView {
-    fn new(job: &Job, layout: Layout) -> Self {
-        Self {
-            pages: (0..layout.pages())
-                .map(|page| render_page(job, &layout, page))
-                .collect(),
-            layout,
-        }
-    }
+fn render_pages(job: &Job, layout: &Layout, options: &OutputOptions) -> Vec<String> {
+    (0..layout.pages())
+        .map(|page| render_page(job, layout, page, options))
+        .collect()
 }
 
 /// The cancellation token of the latest nesting run.
 #[derive(Default)]
 struct Nesting(Mutex<Arc<AtomicBool>>);
 
+/// What gets printed: the latest run's latest Layout, with its Job, and the options it's rendered
+/// with.
+#[derive(Default)]
+struct Output {
+    options: OutputOptions,
+    latest: Option<(Arc<Job>, Layout)>,
+}
+
 /// Nests on a worker thread, sending every improved Layout to `on_progress` and the iterations so far
 /// to `on_iterations` every 250 ms, and returns the best once the time limit is up or
-/// `stop_nesting` is called. A new run stops the one in progress.
+/// `stop_nesting` is called. A new run stops the one in progress. Pages are rendered with `options`
+/// until `set_output_options` changes them.
 #[tauri::command(async)]
 fn nest_job(
     app: tauri::AppHandle,
     nesting: State<Nesting>,
+    output: State<Mutex<Output>>,
     job: JobRequest,
+    options: OutputOptions,
     on_progress: Channel<NestView>,
     on_iterations: Channel<u64>,
 ) -> Result<NestView, String> {
@@ -313,17 +321,30 @@ fn nest_job(
             })
         })
         .collect::<Result<_, String>>()?;
-    let job = Job {
+    let job = Arc::new(Job {
         paper: job.paper,
         sheets_mm: job.sheets_mm,
         separation_mm: job.separation_mm,
         edge_margin_mm: job.edge_margin_mm,
         time_limit: Duration::try_from_secs_f64(job.time_limit_s).map_err(|e| e.to_string())?,
         items,
-    };
+    });
     let cancel = Arc::new(AtomicBool::new(false));
     let previous = std::mem::replace(&mut *nesting.0.lock().unwrap(), cancel.clone());
     previous.store(true, Ordering::Relaxed);
+    output.lock().unwrap().options = options;
+    // Kept for printing, unless a newer run has started.
+    let keep = |layout: Layout| {
+        let mut output = output.lock().unwrap();
+        let view = NestView {
+            pages: render_pages(&job, &layout, &output.options),
+            layout: layout.clone(),
+        };
+        if Arc::ptr_eq(&nesting.0.lock().unwrap(), &cancel) {
+            output.latest = Some((job.clone(), layout));
+        }
+        view
+    };
     let iterations = AtomicU64::new(0);
     let layout = thread::scope(|scope| {
         // Ticks until `_done` is dropped, with the nesting.
@@ -341,13 +362,47 @@ fn nest_job(
             &job,
             0,
             // The frontend may have moved on; nothing to do then.
-            |layout| _ = on_progress.send(NestView::new(&job, layout.clone())),
+            |layout| _ = on_progress.send(keep(layout.clone())),
             &cancel,
             iterations,
         )
     })
     .map_err(|e| e.to_string())?;
-    Ok(NestView::new(&job, layout))
+    Ok(keep(layout))
+}
+
+/// Renders the latest Layout's pages again with `options`, which later ones are rendered with too.
+#[tauri::command]
+fn set_output_options(output: State<Mutex<Output>>, options: OutputOptions) -> Vec<String> {
+    let mut output = output.lock().unwrap();
+    output.options = options;
+    match &output.latest {
+        Some((job, layout)) => render_pages(job, layout, &options),
+        None => vec![],
+    }
+}
+
+/// Asks where to save the latest Layout as a PDF and saves it there. False if the jeweller cancels.
+#[tauri::command(async)]
+fn export_job_pdf(app: tauri::AppHandle, output: State<Mutex<Output>>) -> Result<bool, String> {
+    let (options, Some((job, layout))) = ({
+        let output = output.lock().unwrap();
+        (output.options, output.latest.clone())
+    }) else {
+        return Err("there is no layout to export".into());
+    };
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("PDF", &["pdf"])
+        .set_file_name("argentajo.pdf")
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let pdf = export_pdf(&job, &layout, &options).map_err(|e| e.to_string())?;
+    fs::write(path.into_path().map_err(|e| e.to_string())?, pdf).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// "My sheets": the Sheet sizes saved for reuse, width × height in mm, in a JSON file in app data.
@@ -392,7 +447,9 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(Nesting::default())
+        .manage(Mutex::new(Output::default()))
         .invoke_handler(tauri::generate_handler![
             core_version,
             preview_piece,
@@ -404,6 +461,8 @@ fn main() {
             list_library,
             nest_job,
             stop_nesting,
+            set_output_options,
+            export_job_pdf,
             load_my_sheets,
             save_my_sheets
         ])

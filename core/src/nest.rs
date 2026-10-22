@@ -1,7 +1,6 @@
-//! Nesting: a Job's pieces → a Layout on its Sheets, and a Layout → each printed page as an SVG.
+//! Nesting: a Job's pieces → a Layout on its Sheets.
 
 use crate::piece::Piece;
-use base64::{Engine, engine::general_purpose::STANDARD};
 use jagua_rs::Instant;
 use jagua_rs::geometry::DTransformation;
 use jagua_rs::io::ext_repr::{
@@ -26,7 +25,6 @@ use sparrow::optimizer::optimize;
 use sparrow::sample::search::search_placement;
 use sparrow::util::listener::{ReportType, SeparationProgress, SolutionListener};
 use sparrow::util::terminator::{BasicTerminator, Terminator};
-use std::fmt::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -131,7 +129,7 @@ pub struct Placement {
 pub enum NestError {
     /// There is no Sheet, a size isn't positive, or a separation or margin is negative.
     InvalidSettings,
-    /// A Sheet doesn't fit on the paper inside the printer margin.
+    /// A Sheet doesn't fit on the paper inside the printer margin, beside the verification square.
     SheetOffPaper,
     /// The nesting engine failed.
     Engine(String),
@@ -146,7 +144,7 @@ impl std::fmt::Display for NestError {
             ),
             Self::SheetOffPaper => write!(
                 f,
-                "the sheet does not fit on the paper inside the printer margin"
+                "the sheet does not fit on the paper inside the printer margin, beside the 1 cm verification square"
             ),
             Self::Engine(e) => write!(f, "nesting failed: {e}"),
         }
@@ -157,6 +155,17 @@ impl std::error::Error for NestError {}
 
 /// Between Sheets on the page, so the paper can be cut apart per Sheet.
 const SHEET_GAP_MM: f64 = 5.0;
+
+/// Side of the square on every page that checks the print's scale with a ruler.
+pub(crate) const VERIFICATION_MM: f64 = 10.0;
+
+/// Top-left corner of the verification square: the bottom right of the printable area, where the
+/// Sheets, placed from the top left, leave room for it.
+pub(crate) fn verification_square(paper: Paper) -> [f64; 2] {
+    let [w, h] = paper.size_mm;
+    let m = paper.margin_mm;
+    [w - m - VERIFICATION_MM, h - m - VERIFICATION_MM]
+}
 
 /// Nests the Sheets in order, each taking what it can of the fixed quantities the ones before it
 /// left; copies no Sheet takes are missing. Fill items go into every Sheet's leftover silver. The
@@ -262,25 +271,31 @@ pub fn nest(
 }
 
 /// The Sheets on the pages, still empty: in rows from the top left inside the printer margin,
-/// `SHEET_GAP_MM` apart, starting a new row when one is too wide for this one and a new page when
-/// it is too tall for this one.
+/// `SHEET_GAP_MM` apart and from the verification square, starting a new row when one doesn't fit
+/// in this one and a new page when it doesn't fit in the next.
 fn place_sheets(paper: Paper, sheets: &[[f64; 2]]) -> Result<Vec<SheetLayout>, NestError> {
     let Paper {
         size_mm: [paper_w, paper_h],
         margin_mm: m,
     } = paper;
+    let [square_x, square_y] = verification_square(paper);
     let (mut page, mut x, mut y, mut row_h) = (0, m, m, 0.0f64);
     sheets
         .iter()
         .map(|&[w, h]| {
-            if w + 2.0 * m > paper_w || h + 2.0 * m > paper_h {
-                return Err(NestError::SheetOffPaper);
-            }
-            if x + w > paper_w - m {
+            let fits = |x: f64, y: f64| {
+                x + w <= paper_w - m
+                    && y + h <= paper_h - m
+                    && (x + w <= square_x - SHEET_GAP_MM || y + h <= square_y - SHEET_GAP_MM)
+            };
+            if !fits(x, y) {
                 (x, y, row_h) = (m, y + row_h + SHEET_GAP_MM, 0.0);
             }
-            if y + h > paper_h - m {
+            if !fits(x, y) {
                 (page, x, y, row_h) = (page + 1, m, m, 0.0);
+            }
+            if !fits(x, y) {
+                return Err(NestError::SheetOffPaper);
             }
             let sheet = SheetLayout {
                 page,
@@ -839,71 +854,6 @@ impl Terminator for Stopper {
     fn timeout_at(&self) -> Option<Instant> {
         self.phase.timeout_at().map(|t| t.min(self.deadline))
     }
-}
-
-/// Page `page` as an SVG in mm: its Sheets' outlines and each Part placed on them, as nested.
-pub fn render_page(job: &Job, layout: &Layout, page: usize) -> String {
-    let [page_w, page_h] = job.paper.size_mm;
-    let mut svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{page_w}mm" height="{page_h}mm" viewBox="0 0 {page_w} {page_h}"><defs>"#
-    );
-    for (i, item) in job.items.iter().enumerate() {
-        let [w, h] = item.piece.size_mm;
-        _ = write!(
-            svg,
-            r#"<image id="piece{i}" width="{w}" height="{h}" preserveAspectRatio="none" href="data:image/png;base64,{}"/>"#,
-            STANDARD.encode(&item.piece.png)
-        );
-        // Each Part is placed on its own: it shows only its share of the image.
-        // ponytail: the contour runs ~0.5 px inside the motif's edge, so that rim is clipped off.
-        if item.piece.contours.len() > 1 {
-            for (part, contour) in item.piece.contours.iter().enumerate() {
-                _ = write!(
-                    svg,
-                    r#"<clipPath id="part{i}-{part}"><polygon points="{}"/></clipPath>"#,
-                    points(contour)
-                );
-            }
-        }
-    }
-    _ = write!(
-        svg,
-        r#"</defs><rect width="{page_w}" height="{page_h}" fill="white"/>"#
-    );
-    for (sheet, [sheet_w, sheet_h]) in layout.sheets.iter().zip(&job.sheets_mm) {
-        if sheet.page != page {
-            continue;
-        }
-        let [x, y] = sheet.origin_mm;
-        _ = write!(
-            svg,
-            r#"<g transform="translate({x} {y})"><rect width="{sheet_w}" height="{sheet_h}" fill="none" stroke="black" stroke-width="0.2"/>"#
-        );
-        for p in &sheet.placements {
-            let [a, b, c, d, e, f] = p.transform;
-            let clip = if job.items[p.item].piece.contours.len() > 1 {
-                format!(r#" clip-path="url(#part{}-{})""#, p.item, p.part)
-            } else {
-                String::new()
-            };
-            // In a group, so the clip path is in the Piece's coordinates too.
-            _ = write!(
-                svg,
-                r##"<g transform="matrix({a} {b} {c} {d} {e} {f})"><use href="#piece{}"{clip}/></g>"##,
-                p.item
-            );
-        }
-        svg += "</g>";
-    }
-    svg + "</svg>"
-}
-
-fn points(polygon: &[[f64; 2]]) -> String {
-    polygon
-        .iter()
-        .map(|[x, y]| format!("{x},{y}"))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// An affine transformation in SVG `matrix(a b c d e f)` order.

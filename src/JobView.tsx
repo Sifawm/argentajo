@@ -1,14 +1,27 @@
-import { Bookmark, CircleStop, Play, Plus, RefreshCw, TriangleAlert, X } from "lucide-react";
-import { ToggleGroup } from "radix-ui";
+import {
+  Bookmark,
+  CircleStop,
+  FileDown,
+  Play,
+  Plus,
+  RefreshCw,
+  TriangleAlert,
+  X,
+} from "lucide-react";
+import { AlertDialog, ToggleGroup } from "radix-ui";
 import { type DragEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  DEFAULT_OUTPUT,
+  exportPdf,
   type JobRequest,
   loadMySheets,
   type NestView,
   nestJob,
+  type OutputOptions,
   PAPERS,
   saveMySheets,
+  setOutputOptions,
   type Size,
   stopNesting,
 } from "./job";
@@ -46,6 +59,9 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
   const [started, setStarted] = useState<{ at: number; seconds: number }>();
   const [iterations, setIterations] = useState(0);
   const [error, setError] = useState<string>();
+  const [output, setOutput] = useState<OutputOptions>(DEFAULT_OUTPUT);
+  // Shows the print-at-100 % reminder.
+  const [exported, setExported] = useState(false);
   // Counts runs, so a superseded one's late progress is ignored.
   const run = useRef(0);
 
@@ -125,7 +141,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     setStarted({ at: performance.now(), seconds: next.timeLimitS });
     setIterations(0);
     setError(undefined);
-    nestJob(next, show, (n) => {
+    nestJob(next, output, show, (n) => {
       if (id === run.current) setIterations(n);
     })
       .then(show, (e) => {
@@ -156,6 +172,17 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     setCalculating(false);
     setResult(undefined);
   };
+
+  const changeOutput = (next: OutputOptions) => {
+    setOutput(next);
+    setOutputOptions(next).then(
+      (pages) => setResult((result) => result && { ...result, view: { ...result.view, pages } }),
+      (e) => setError(String(e)),
+    );
+  };
+
+  const exportResult = () =>
+    exportPdf().then(setExported, (e) => setError(t("exportFailed", { error: String(e) })));
 
   const numberInput = (
     label: string,
@@ -449,6 +476,33 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
       <div className="flex min-w-0 flex-1 flex-col gap-3">
         {result ? (
           <>
+            <div className="flex flex-wrap items-center gap-4 text-sm">
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={output.sheetOutline}
+                  onChange={(e) => changeOutput({ ...output, sheetOutline: e.target.checked })}
+                />
+                {t("sheetOutline")}
+              </label>
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={output.silhouette}
+                  onChange={(e) => changeOutput({ ...output, silhouette: e.target.checked })}
+                />
+                {t("silhouette")}
+              </label>
+              <button
+                type="button"
+                disabled={calculating || stale}
+                onClick={() => void exportResult()}
+                className="inline-flex items-center gap-2 rounded-md bg-zinc-900 px-3 py-1 text-white disabled:opacity-40"
+              >
+                <FileDown aria-hidden className="size-4" />
+                {t("exportPdf")}
+              </button>
+            </div>
             <p className="text-sm" role="status">
               {t("utilisation", { value: result.view.utilisation })} ·{" "}
               {t("placed", { placed, count: ordered })}
@@ -517,6 +571,21 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
           <p className="m-auto text-zinc-500">{t("noResult")}</p>
         )}
       </div>
+
+      <AlertDialog.Root open={exported} onOpenChange={setExported}>
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="fixed inset-0 bg-black/40" />
+          <AlertDialog.Content className="fixed top-1/2 left-1/2 flex w-96 -translate-1/2 flex-col gap-4 rounded-lg bg-white p-6 shadow-xl">
+            <AlertDialog.Title className="text-lg font-semibold">{t("exported")}</AlertDialog.Title>
+            <AlertDialog.Description className="text-sm text-zinc-600">
+              {t("printAtActualSize")}
+            </AlertDialog.Description>
+            <AlertDialog.Action className="self-end rounded-md bg-zinc-900 px-4 py-2 text-sm text-white">
+              {t("ok")}
+            </AlertDialog.Action>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
     </section>
   );
 }

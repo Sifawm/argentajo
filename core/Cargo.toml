@@ -11,7 +11,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 imageproc = { version = "0.27", default-features = false }
 # At the version sparrow pins (sparrow is not on crates.io).
 jagua-rs = { version = "=1.1.0", features = ["spp"] }
+# At the version svg2pdf writes with: its chunks go into the PDF built here.
+pdf-writer = "0.12"
 rand = "0.10"
 resvg = "0.48"
 serde = { version = "1", features = ["derive"] }
 sparrow = { git = "https://github.com/JeroenGar/sparrow", rev = "1fe3e3146110c34d77510636defb737c7ce893c6" }
+# Its own usvg (0.45) parses the pages for the PDF; no text is ever drawn.
+svg2pdf = { version = "0.13", default-features = false, features = ["image"] }

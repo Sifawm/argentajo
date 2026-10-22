@@ -52,5 +52,12 @@
   "timeLeft_other": "Quedan {{count}} s",
   "finishing": "Terminando la primera distribución…",
   "iterations_one": "{{count, number}} iteración",
-  "iterations_other": "{{count, number}} iteraciones"
+  "iterations_other": "{{count, number}} iteraciones",
+  "sheetOutline": "Contorno de las láminas",
+  "silhouette": "Silueta de corte",
+  "exportPdf": "Exportar PDF",
+  "exportFailed": "No se pudo exportar el PDF: {{error}}",
+  "exported": "PDF guardado",
+  "printAtActualSize": "Imprímelo al 100 % (tamaño real): nunca «ajustar a la página» ni otra escala. Después comprueba con una regla que el cuadrado negro mide exactamente 1 × 1 cm.",
+  "ok": "Aceptar"
 }
