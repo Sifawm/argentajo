@@ -43,14 +43,53 @@ pub enum RealSize {
     Height(f64),
 }
 
+/// Well-known id for the backward-compatible Normal size.
+pub const NORMAL_SIZE_ID: &str = "normal";
+
+fn normal_size_input(measure: Option<RealSize>) -> SizeInput {
+    SizeInput {
+        id: NORMAL_SIZE_ID.into(),
+        name: "Normal".into(),
+        measure,
+    }
+}
+
+fn normal_size(mm: f64) -> Size {
+    Size {
+        id: NORMAL_SIZE_ID.into(),
+        name: "Normal".into(),
+        measure: RealSize::Width(mm),
+    }
+}
+
+/// A named real size of a Piece. The first Size is the Default size.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
+pub struct Size {
+    pub id: String,
+    pub name: String,
+    pub measure: RealSize,
+}
+
+/// A Size as it arrives in preparation options: its measure may be missing, in which case the
+/// first size is derived from the file's resolution (or the default width) as today.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SizeInput {
+    pub id: String,
+    pub name: String,
+    pub measure: Option<RealSize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default, from = "PrepareOptionsData")]
 pub struct PrepareOptions {
     /// Largest per-channel distance from white still treated as background (0–255).
     /// Ignored when the image already has transparency.
     pub tolerance: u8,
-    /// `None` takes it from the file's resolution (DPI), or `DEFAULT_WIDTH_MM` wide without one.
-    pub size: Option<RealSize>,
+    /// The Piece's named Sizes. The first is the Default size, used to set the scale during
+    /// preparation. When empty, a single Normal size is created from the legacy `size` field.
+    pub sizes: Vec<SizeInput>,
     pub allow_rotation: bool,
     pub allow_mirror: bool,
     /// Manual brush/eraser edits: a PNG the size of the source image. Transparent pixels keep the
@@ -60,11 +99,51 @@ pub struct PrepareOptions {
     pub edits: Option<Vec<u8>>,
 }
 
-impl Default for PrepareOptions {
+/// Backward-compatible deserialization: old `source.json` files had a single `size` field.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct PrepareOptionsData {
+    tolerance: u8,
+    size: Option<RealSize>,
+    sizes: Vec<SizeInput>,
+    allow_rotation: bool,
+    allow_mirror: bool,
+}
+
+impl Default for PrepareOptionsData {
     fn default() -> Self {
         Self {
             tolerance: 32,
             size: None,
+            sizes: Vec::new(),
+            allow_rotation: true,
+            allow_mirror: false,
+        }
+    }
+}
+
+impl From<PrepareOptionsData> for PrepareOptions {
+    fn from(data: PrepareOptionsData) -> Self {
+        let sizes = if data.sizes.is_empty() {
+            vec![normal_size_input(data.size)]
+        } else {
+            data.sizes
+        };
+        Self {
+            tolerance: data.tolerance,
+            sizes,
+            allow_rotation: data.allow_rotation,
+            allow_mirror: data.allow_mirror,
+            edits: None,
+        }
+    }
+}
+
+impl Default for PrepareOptions {
+    fn default() -> Self {
+        Self {
+            tolerance: 32,
+            sizes: Vec::new(),
             allow_rotation: true,
             allow_mirror: false,
             edits: None,
@@ -72,9 +151,54 @@ impl Default for PrepareOptions {
     }
 }
 
+/// Backward-compatible deserialization: old `piece.json` files had no `sizes` field.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PieceData {
+    #[serde(skip)]
+    png: Vec<u8>,
+    size_px: [u32; 2],
+    #[serde(default)]
+    offset_px: [u32; 2],
+    #[serde(default)]
+    source_px: [u32; 2],
+    size_mm: [f64; 2],
+    #[serde(default)]
+    ppi: f64,
+    #[serde(default)]
+    low_resolution: bool,
+    contours: Vec<Vec<[f64; 2]>>,
+    allow_rotation: bool,
+    allow_mirror: bool,
+    #[serde(default)]
+    sizes: Vec<Size>,
+}
+
+impl From<PieceData> for Piece {
+    fn from(data: PieceData) -> Self {
+        let mut sizes = data.sizes;
+        if sizes.is_empty() {
+            sizes = vec![normal_size(data.size_mm[0])];
+        }
+        Self {
+            png: data.png,
+            size_px: data.size_px,
+            offset_px: data.offset_px,
+            source_px: data.source_px,
+            size_mm: data.size_mm,
+            ppi: data.ppi,
+            low_resolution: data.low_resolution,
+            contours: data.contours,
+            allow_rotation: data.allow_rotation,
+            allow_mirror: data.allow_mirror,
+            sizes,
+        }
+    }
+}
+
 /// A cleaned motif, cropped to its mask. Coordinates are in mm, origin top-left, y down.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "PieceData")]
 pub struct Piece {
     /// Cleaned PNG: background transparent, interior holes kept visible.
     #[serde(skip)]
@@ -99,6 +223,8 @@ pub struct Piece {
     pub contours: Vec<Vec<[f64; 2]>>,
     pub allow_rotation: bool,
     pub allow_mirror: bool,
+    /// Ordered, non-empty list of named Sizes. The first is the Default size.
+    pub sizes: Vec<Size>,
 }
 
 impl Piece {
@@ -106,12 +232,47 @@ impl Piece {
     /// whose source was not kept (a split one) reopens for editing.
     pub fn reopen_options(&self) -> PrepareOptions {
         PrepareOptions {
-            size: Some(RealSize::Width(self.size_mm[0])),
+            sizes: self
+                .sizes
+                .iter()
+                .map(|s| SizeInput {
+                    id: s.id.clone(),
+                    name: s.name.clone(),
+                    measure: Some(s.measure),
+                })
+                .collect(),
             allow_rotation: self.allow_rotation,
             allow_mirror: self.allow_mirror,
             ..Default::default()
         }
     }
+}
+
+/// Returns a copy of `piece` scaled to the Size with `size_id`, or `None` if the id is unknown.
+/// The contour, dimensions and effective ppi are scaled uniformly; the Size list is reduced to
+/// that single Size so callers downstream of nesting/output only ever see one Size.
+pub fn piece_at_size(piece: &Piece, size_id: &str) -> Option<Piece> {
+    let size = piece.sizes.iter().find(|s| s.id == size_id)?;
+    let scale = match size.measure {
+        RealSize::Width(mm) => mm / piece.size_mm[0],
+        RealSize::Height(mm) => mm / piece.size_mm[1],
+    };
+    let mut scaled = piece.clone();
+    scaled.size_mm = [piece.size_mm[0] * scale, piece.size_mm[1] * scale];
+    scaled.ppi = piece.ppi / scale;
+    scaled.low_resolution = scaled.ppi < MIN_PPI;
+    scaled.contours = piece
+        .contours
+        .iter()
+        .map(|contour| {
+            contour
+                .iter()
+                .map(|&[x, y]| [x * scale, y * scale])
+                .collect()
+        })
+        .collect();
+    scaled.sizes = vec![size.clone()];
+    Some(scaled)
 }
 
 #[derive(Debug)]
@@ -154,7 +315,20 @@ impl From<usvg::Error> for PrepareError {
 
 pub fn prepare_piece(bytes: &[u8], options: &PrepareOptions) -> Result<Piece, PrepareError> {
     let (image, mask, mm_per_px) = clean(bytes, options)?;
-    cut_out(&image, &mask, mm_per_px, options)
+    let mut piece = cut_out(&image, &mask, mm_per_px, options)?;
+    piece.sizes = options
+        .sizes
+        .iter()
+        .map(|s| Size {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            measure: s.measure.unwrap_or(RealSize::Width(piece.size_mm[0])),
+        })
+        .collect();
+    if piece.sizes.is_empty() {
+        piece.sizes = vec![normal_size(piece.size_mm[0])];
+    }
+    Ok(piece)
 }
 
 /// One Piece per Part, at the scale the whole image gets from `options.size`, so the Pieces keep
@@ -174,7 +348,9 @@ pub fn split_piece(bytes: &[u8], options: &PrepareOptions) -> Result<Vec<Piece>,
                     0
                 }])
             });
-            cut_out(&image, &mask, mm_per_px, options)
+            let mut piece = cut_out(&image, &mask, mm_per_px, options)?;
+            piece.sizes = vec![normal_size(piece.size_mm[0])];
+            Ok(piece)
         })
         .collect()
 }
@@ -193,9 +369,13 @@ fn clean(
     // After the edits, so whatever an eraser stroke leaves behind goes too.
     drop_specks(&mut mask);
     let (_, _, w, h) = bounding_box(&mask).ok_or(PrepareError::Empty)?;
-    let size = options.size.unwrap_or(RealSize::Width(
-        dpi.map_or(DEFAULT_WIDTH_MM, |dpi| w as f64 * 25.4 / dpi),
-    ));
+    let size = options
+        .sizes
+        .first()
+        .and_then(|s| s.measure)
+        .unwrap_or(RealSize::Width(
+            dpi.map_or(DEFAULT_WIDTH_MM, |dpi| w as f64 * 25.4 / dpi),
+        ));
     let mm_per_px = match size {
         RealSize::Width(mm) => mm / w as f64,
         RealSize::Height(mm) => mm / h as f64,
@@ -232,6 +412,7 @@ fn cut_out(
         contours: contours(&mask.view(x0, y0, w, h).to_image(), mm_per_px),
         allow_rotation: options.allow_rotation,
         allow_mirror: options.allow_mirror,
+        sizes: Vec::new(),
     })
 }
 

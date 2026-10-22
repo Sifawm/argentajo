@@ -1,10 +1,57 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { TFunction } from "i18next";
+import { formatSize, type Unit } from "./preferences";
+
+/** A named real Size of a Piece: a side in mm, the other follows the proportions. */
+export interface Size {
+  id: string;
+  name: string;
+  measure: { width: number } | { height: number };
+}
+
+/** A Size as it arrives in preparation options; the first one may omit its measure. */
+export interface SizeInput {
+  id: string;
+  name: string;
+  measure?: { width: number } | { height: number };
+}
+
+/** Well-known id for the backward-compatible Normal size. */
+export const NORMAL_SIZE_ID = "normal";
+
+/** Minimum effective ppi before a Size is flagged as low resolution. Kept in sync with core. */
+export const MIN_PPI = 150;
+
+/**
+ * Computes the real dimensions of `piece` at `sizeId`. The Default size returns the piece's own
+ * `sizeMm`; other Sizes are scaled uniformly by their measure against the Default size.
+ */
+export const sizeDimensions = (piece: PieceView, sizeId: string): [number, number] | undefined => {
+  const size = piece.sizes.find((s) => s.id === sizeId);
+  if (!size) return undefined;
+  const [w, h] = piece.sizeMm;
+  if (sizeId === piece.sizes[0]?.id) return [w, h];
+  const scale = size.measure
+    ? "width" in size.measure
+      ? size.measure.width / w
+      : size.measure.height / h
+    : 1;
+  return [w * scale, h * scale];
+};
+
+/** "Name · W × H unit" for a Size of a Piece. */
+export const sizeLabel = (piece: PieceView, sizeId: string, unit: Unit, t: TFunction): string => {
+  const size = piece.sizes.find((s) => s.id === sizeId);
+  if (!size) return "";
+  const dims = sizeDimensions(piece, sizeId);
+  return `${size.name} · ${dims ? formatSize(t, dims, unit) : ""}`;
+};
 
 /** Mirrors `core::piece::PrepareOptions`. Sizes are in mm. */
 export interface PrepareOptions {
   tolerance: number;
-  /** `null` takes it from the file's resolution (DPI), or 20 mm wide without one. */
-  size: { width: number } | { height: number } | null;
+  /** The Piece's named Sizes. The first is the Default size; a missing measure is derived from DPI. */
+  sizes: SizeInput[];
   allowRotation: boolean;
   allowMirror: boolean;
 }
@@ -27,6 +74,8 @@ export interface PieceView {
   contours: [number, number][][];
   allowRotation: boolean;
   allowMirror: boolean;
+  /** Ordered, non-empty list of named Sizes. The first is the Default size. */
+  sizes: Size[];
 }
 
 /** Manual brush/eraser edits: a PNG the size of the source image, read by `core` (`PrepareOptions::edits`). */
@@ -69,7 +118,7 @@ export const updatePiece = (
   edits?: Edits,
 ) => prepare("update_piece", image, options, edits, { id, type });
 
-/** One Library piece per Part, all at the scale `options.size` gives the whole image. */
+/** One Library piece per Part, all at the scale the first Size in `options.sizes` gives. */
 export const splitToLibrary = (image: Uint8Array, options: PrepareOptions, edits?: Edits) =>
   prepare<PieceView[]>("split_to_library", image, options, edits);
 

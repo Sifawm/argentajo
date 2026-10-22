@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { NORMAL_SIZE_ID } from "./library";
 import type { PieceView } from "./library";
 
 /** Width × height in mm. */
@@ -26,15 +27,22 @@ export interface JobRequest {
   /** Bound on the nesting run, in seconds. */
   timeLimitS: number;
   /**
-   * Piece ids, of the Library or of the Job file opened last, with a fixed quantity, or "fill" for
-   * as many as fit in the silver left.
+   * Pieces from the Library or the Job file opened last, each at one of their Sizes, with a fixed
+   * quantity or "fill" for as many as fit in the silver left.
    */
-  items: { id: string; quantity: { fixed: number } | "fill" }[];
+  items: { id: string; size_id: string; quantity: { fixed: number } | "fill"; fixed?: boolean }[];
 }
 
 export type PaperName = keyof typeof PAPERS | "custom";
 /** The quantity is kept while the item is on fill, for when it's switched back. */
-export type Item = { id: string; quantity: number; fill: boolean };
+export type Item = {
+  id: string;
+  size: string;
+  quantity: number;
+  fill: boolean;
+  /** True when the Item came from a reopened Job file and its Size must stay fixed. */
+  fixed?: boolean;
+};
 
 /** A Job as it's edited. Sizes in mm, the time limit in seconds. */
 export interface JobSettings {
@@ -65,9 +73,11 @@ export const toJobRequest = (settings: JobSettings): JobRequest => {
     separationMm: settings.separation,
     edgeMarginMm: settings.edgeMargin,
     timeLimitS: settings.timeLimit,
-    items: settings.items.map(({ id, quantity, fill }) => ({
+    items: settings.items.map(({ id, size, quantity, fill, fixed }) => ({
       id,
+      size_id: size ?? NORMAL_SIZE_ID,
       quantity: fill ? "fill" : { fixed: quantity },
+      fixed: fixed ?? false,
     })),
   };
 };
@@ -88,13 +98,82 @@ export const fromJobRequest = (job: JobRequest): JobSettings => {
     separation: job.separationMm,
     edgeMargin: job.edgeMarginMm,
     timeLimit: job.timeLimitS,
-    items: job.items.map(({ id, quantity }) =>
+    items: job.items.map(({ id, size_id, quantity, fixed }) =>
       quantity === "fill"
-        ? { id, quantity: 1, fill: true }
-        : { id, quantity: quantity.fixed, fill: false },
+        ? { id, size: size_id, quantity: 1, fill: true, fixed }
+        : { id, size: size_id, quantity: quantity.fixed, fill: false, fixed },
     ),
   };
 };
+
+/** Returns the first Size's id, the Default size. */
+export const defaultSizeId = (piece: PieceView): string => piece.sizes[0]?.id ?? NORMAL_SIZE_ID;
+
+/** Adds `piece` at its Default size, or bumps the quantity if that Item is already in the Job. */
+export const addPiece = (items: Item[], piece: PieceView): Item[] => {
+  const id = piece.id;
+  if (!id) return items;
+  const size = defaultSizeId(piece);
+  const index = items.findIndex((item) => item.id === id && item.size === size);
+  if (index === -1) return [...items, { id, size, quantity: 1, fill: false }];
+  return items.map((item, i) => (i === index ? { ...item, quantity: item.quantity + 1 } : item));
+};
+
+/** Changes the Size of the Item keyed by `itemKey`. On collision with an existing Item the two are
+ * merged: quantities are summed and fill is kept if either was fill. */
+export const changeItemSize = (
+  items: Item[],
+  itemKey: { id: string; size: string },
+  newSizeId: string,
+  pieces: PieceView[],
+): Item[] => {
+  if (itemKey.size === newSizeId) return items;
+  const piece = pieces.find((p) => p.id === itemKey.id);
+  if (!piece || !piece.sizes.some((s) => s.id === newSizeId)) return items;
+  const targetIndex = items.findIndex(
+    (item) => item.id === itemKey.id && item.size === itemKey.size,
+  );
+  if (targetIndex === -1) return items;
+  const target = items[targetIndex];
+  const mergeIndex = items.findIndex((item) => item.id === itemKey.id && item.size === newSizeId);
+  if (mergeIndex === -1) {
+    return [
+      ...items.slice(0, targetIndex),
+      { ...target, size: newSizeId },
+      ...items.slice(targetIndex + 1),
+    ];
+  }
+  const merge = items[mergeIndex];
+  const merged: Item = {
+    ...merge,
+    quantity: merge.quantity + target.quantity,
+    fill: merge.fill || target.fill,
+  };
+  return items
+    .map((item, i) => {
+      if (i === mergeIndex) return merged;
+      if (i === targetIndex) return undefined;
+      return item;
+    })
+    .filter((item): item is Item => item !== undefined);
+};
+
+/** Adds the first Size of `piece` not yet in the Job, with quantity 1 and fill false. */
+export const addAnotherSize = (items: Item[], piece: PieceView): Item[] | undefined => {
+  const id = piece.id;
+  if (!id) return undefined;
+  const used = new Set(items.filter((item) => item.id === id).map((item) => item.size));
+  const next = piece.sizes.find((s) => !used.has(s.id));
+  if (!next) return undefined;
+  return [...items, { id, size: next.id, quantity: 1, fill: false }];
+};
+
+/** Removes Items whose Piece or Size no longer exists in `pieces`. */
+export const dropMissingItems = (items: Item[], pieces: PieceView[]): Item[] =>
+  items.filter((item) => {
+    const piece = pieces.find((p) => p.id === item.id);
+    return piece !== undefined && piece.sizes.some((s) => s.id === item.size);
+  });
 
 /** Mirrors `core::output::OutputOptions`: what's printed besides the pieces and the 1 cm square. */
 export interface OutputOptions {
