@@ -70,7 +70,13 @@ impl Job {
 pub struct JobItem {
     #[serde(with = "crate::job_file::embedded")]
     pub piece: Piece,
+    #[serde(default = "normal_size_id")]
+    pub size_id: String,
     pub quantity: Quantity,
+}
+
+fn normal_size_id() -> String {
+    crate::piece::NORMAL_SIZE_ID.into()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
