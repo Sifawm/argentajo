@@ -40,5 +40,10 @@
   "placedOf": "{{placed}} / {{quantity}}",
   "placedFill": "{{placed}} (fill)",
   "exclude": "Exclude from the result",
-  "stale": "Settings changed since this layout. Press Calculate to update it."
+  "stale": "Settings changed since this layout. Press Calculate to update it.",
+  "timeLeft_one": "{{count}} s left",
+  "timeLeft_other": "{{count}} s left",
+  "finishing": "Finishing the first layout…",
+  "iterations_one": "{{count, number}} iteration",
+  "iterations_other": "{{count, number}} iterations"
 }

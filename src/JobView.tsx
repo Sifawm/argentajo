@@ -1,4 +1,4 @@
-import { CircleStop, LoaderCircle, Play, RefreshCw, TriangleAlert, X } from "lucide-react";
+import { CircleStop, Play, RefreshCw, TriangleAlert, X } from "lucide-react";
 import { ToggleGroup } from "radix-ui";
 import { type DragEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -30,6 +30,9 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
   const [result, setResult] = useState<{ view: NestView; job: JobRequest }>();
   const [svgUrl, setSvgUrl] = useState<string>();
   const [calculating, setCalculating] = useState(false);
+  // When the run in progress started, in `performance.now()` ms, and its time limit.
+  const [started, setStarted] = useState<{ at: number; seconds: number }>();
+  const [iterations, setIterations] = useState(0);
   const [error, setError] = useState<string>();
   // Counts runs, so a superseded one's late progress is ignored.
   const run = useRef(0);
@@ -87,15 +90,19 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     if (id) add(id);
   };
 
-  // A new run, with a new seed, replaces the one in progress.
+  // A new run replaces the one in progress.
   const calculate = (next = job) => {
     const id = ++run.current;
     const show = (view: NestView) => {
       if (id === run.current) setResult({ view, job: next });
     };
     setCalculating(true);
+    setStarted({ at: performance.now(), seconds: next.timeLimitS });
+    setIterations(0);
     setError(undefined);
-    nestJob(next, show)
+    nestJob(next, show, (n) => {
+      if (id === run.current) setIterations(n);
+    })
       .then(show, (e) => {
         if (id === run.current) setError(t("nestFailed", { error: String(e) }));
       })
@@ -306,14 +313,17 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
 
         {numberInput(t("timeLimit"), timeLimit, setTimeLimit, "1")}
         {calculating ? (
-          <button
-            type="button"
-            onClick={() => void stopNesting()}
-            className="inline-flex items-center justify-center gap-2 rounded-md bg-zinc-900 px-4 py-2 text-sm text-white"
-          >
-            <CircleStop aria-hidden className="size-4" />
-            {t("stop")}
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => void stopNesting()}
+              className="inline-flex items-center justify-center gap-2 rounded-md bg-zinc-900 px-4 py-2 text-sm text-white"
+            >
+              <CircleStop aria-hidden className="size-4" />
+              {t("stop")}
+            </button>
+            {started && <TimeLeft key={started.at} {...started} iterations={iterations} />}
+          </>
         ) : (
           <button
             type="button"
@@ -339,8 +349,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
       <div className="flex min-w-0 flex-1 flex-col gap-3">
         {result ? (
           <>
-            <p className="flex items-center gap-2 text-sm" role="status">
-              {calculating && <LoaderCircle aria-hidden className="size-4 animate-spin" />}
+            <p className="text-sm" role="status">
               {t("utilisation", { value: result.view.utilisation })} ·{" "}
               {t("placed", { placed, count: ordered })}
             </p>
@@ -392,6 +401,38 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
         )}
       </div>
     </section>
+  );
+}
+
+/**
+ * Counts down the run's time limit, with the iterations tried so far. The first Layout is always
+ * waited for, so it may run over.
+ */
+function TimeLeft({
+  at,
+  seconds,
+  iterations,
+}: {
+  at: number;
+  seconds: number;
+  iterations: number;
+}) {
+  const { t } = useTranslation("job");
+  const [now, setNow] = useState(at);
+  useEffect(() => {
+    const id = setInterval(() => setNow(performance.now()), 250);
+    return () => clearInterval(id);
+  }, []);
+  const elapsed = Math.min((now - at) / 1000, seconds);
+  const left = Math.ceil(seconds - elapsed);
+  return (
+    <label className="flex flex-col gap-1 text-xs text-zinc-600">
+      <span>
+        {left > 0 ? t("timeLeft", { count: left }) : t("finishing")} ·{" "}
+        {t("iterations", { count: iterations })}
+      </span>
+      <progress max={seconds} value={elapsed} className="w-full" />
+    </label>
   );
 }
 

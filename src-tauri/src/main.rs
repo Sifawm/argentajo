@@ -7,8 +7,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeBody, Request};
 use tauri::{Manager, State};
@@ -288,14 +290,16 @@ impl NestView {
 #[derive(Default)]
 struct Nesting(Mutex<Arc<AtomicBool>>);
 
-/// Nests on a worker thread, sending every improved Layout to `on_progress`, and returns the best
-/// once the time limit is up or `stop_nesting` is called. A new run stops the one in progress.
+/// Nests on a worker thread, sending every improved Layout to `on_progress` and the iterations so far
+/// to `on_iterations` every 250 ms, and returns the best once the time limit is up or
+/// `stop_nesting` is called. A new run stops the one in progress.
 #[tauri::command(async)]
 fn nest_job(
     app: tauri::AppHandle,
     nesting: State<Nesting>,
     job: JobRequest,
     on_progress: Channel<NestView>,
+    on_iterations: Channel<u64>,
 ) -> Result<NestView, String> {
     let items = job
         .items
@@ -315,20 +319,31 @@ fn nest_job(
         time_limit: Duration::try_from_secs_f64(job.time_limit_s).map_err(|e| e.to_string())?,
         items,
     };
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
     let cancel = Arc::new(AtomicBool::new(false));
     let previous = std::mem::replace(&mut *nesting.0.lock().unwrap(), cancel.clone());
     previous.store(true, Ordering::Relaxed);
-    let layout = nest(
-        &job,
-        seed,
-        // The frontend may have moved on; nothing to do then.
-        |layout| _ = on_progress.send(NestView::new(&job, layout.clone())),
-        &cancel,
-    )
+    let iterations = AtomicU64::new(0);
+    let layout = thread::scope(|scope| {
+        // Ticks until `_done` is dropped, with the nesting.
+        let (_done, ticks) = mpsc::channel::<()>();
+        let (iterations, on_iterations) = (&iterations, &on_iterations);
+        scope.spawn(move || {
+            while let Err(RecvTimeoutError::Timeout) =
+                ticks.recv_timeout(Duration::from_millis(250))
+            {
+                _ = on_iterations.send(iterations.load(Ordering::Relaxed));
+            }
+        });
+        // A fixed seed: the same Job gives the same Layouts, as far as the time limit lets it get.
+        nest(
+            &job,
+            0,
+            // The frontend may have moved on; nothing to do then.
+            |layout| _ = on_progress.send(NestView::new(&job, layout.clone())),
+            &cancel,
+            iterations,
+        )
+    })
     .map_err(|e| e.to_string())?;
     Ok(NestView::new(&job, layout))
 }

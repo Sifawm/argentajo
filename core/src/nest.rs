@@ -24,11 +24,11 @@ use sparrow::eval::sample_eval::SampleEval;
 use sparrow::optimizer::lbf::ConstructionError;
 use sparrow::optimizer::optimize;
 use sparrow::sample::search::search_placement;
-use sparrow::util::listener::{ReportType, SolutionListener};
+use sparrow::util::listener::{ReportType, SeparationProgress, SolutionListener};
 use sparrow::util::terminator::{BasicTerminator, Terminator};
 use std::fmt::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
@@ -140,14 +140,15 @@ impl std::error::Error for NestError {}
 /// Fill items then go into the silver left over, as many as fit.
 ///
 /// Runs until the Job's time limit or `cancel`, though always until a first Layout, and returns the
-/// best Layout found: the most silver used by fixed quantities, then the shortest stretch of Sheet
-/// they take. `on_progress` gets each Layout better than the last, so the last one it gets is the
-/// one returned.
+/// best Layout found: the most silver used by fixed quantities, then the most used in all, then the
+/// shortest stretch of Sheet the fixed quantities take. `on_progress` gets each Layout better than the last, so the last one it gets is the
+/// one returned. `iterations` counts the attempts behind them: sparrow's and each fill.
 pub fn nest(
     job: &Job,
     seed: u64,
     mut on_progress: impl FnMut(&Layout),
     cancel: &AtomicBool,
+    iterations: &AtomicU64,
 ) -> Result<Layout, NestError> {
     let deadline = Instant::now() + job.time_limit;
     let Paper {
@@ -339,14 +340,15 @@ pub fn nest(
         Some((empty, fills))
     };
     // `kept` with copies of the Fill items inserted one by one into the free space, in turn, each
-    // at the sampled spot nearest the start of the Sheet where all its Parts fit, until none fits
-    // or, unless it must `finish`, the run ends; and whether it got that far.
+    // at the spot nearest the start of the Sheet where all its Parts fit, of those sampled with
+    // `seed`, until none fits or, unless it must `finish`, the run ends; and whether it got that far.
     // ponytail: greedy insertion, no copy is moved to make room for another; upgrade to a knapsack
     // optimiser on jagua-rs, or re-run sparrow with growing fill counts, if fill quality matters.
-    let fill = |kept: Solution, finish: bool| -> (Solution, bool) {
+    let fill = |kept: Solution, finish: bool, seed: u64| -> (Solution, bool) {
         let Some((empty, fills)) = &filler else {
             return (kept, true);
         };
+        iterations.fetch_add(1, Ordering::Relaxed);
         let mut prob = empty.clone();
         let instance = empty.instance();
         for placed in kept {
@@ -462,25 +464,47 @@ pub fn nest(
         if items.is_empty() {
             break;
         }
+        // The same copies' areas summed in another order can differ in their last bits.
+        let same = |a: f64, b: f64| (a - b).abs() < 1e-9;
         let on_solution = |solution| {
             let (kept, length) = keep(&unplaceable, solution);
             let fixed = layout_of(&kept).utilisation;
-            let better = best.as_ref().is_none_or(|(_, best_fixed, best_length)| {
-                (fixed, -length) > (*best_fixed, -best_length)
-            });
-            if !better {
+            if best
+                .as_ref()
+                .is_some_and(|(_, best_fixed, _)| fixed < *best_fixed && !same(fixed, *best_fixed))
+            {
                 return;
             }
             // The first Layout is always filled whole, like it is always waited for. A later fill
             // the run ended in the middle of can't stand in for a whole one.
-            let (filled, whole) = fill(kept, best.is_none());
-            if whole {
-                let layout = layout_of(&filled);
+            let (filled, whole) = fill(kept, best.is_none(), seed);
+            if !whole {
+                return;
+            }
+            // A shorter stretch of fixed quantities can leave fill less room: compare once filled.
+            let layout = layout_of(&filled);
+            let better = best.as_ref().is_none_or(|(best, best_fixed, best_length)| {
+                if !same(fixed, *best_fixed) {
+                    fixed > *best_fixed
+                } else if !same(layout.utilisation, best.utilisation) {
+                    layout.utilisation > best.utilisation
+                } else {
+                    length < *best_length
+                }
+            });
+            if better {
                 on_progress(&layout);
                 best = Some((layout, fixed, length));
             }
         };
-        match strip_pack(instance(items), seed, deadline, cancel, on_solution) {
+        match strip_pack(
+            instance(items),
+            seed,
+            deadline,
+            cancel,
+            iterations,
+            on_solution,
+        ) {
             Ok(()) => break,
             // A Part that only just fits across on paper, but not once jagua-rs has simplified and
             // inflated it: missing too.
@@ -494,11 +518,25 @@ pub fn nest(
     }
     Ok(match best {
         Some((layout, ..)) => layout,
-        // No fixed quantities to place: only fill.
+        // No fixed quantities to place: only fill, retried with the next seeds until the run ends.
+        // ponytail: random restarts of the greedy fill; search around the best one if they plateau.
         None => {
-            let layout = layout_of(&fill(vec![], true).0);
-            on_progress(&layout);
-            layout
+            let mut best = layout_of(&fill(vec![], true, seed).0);
+            on_progress(&best);
+            if filler.is_some() {
+                for seed in (1..).map(|k| seed.wrapping_add(k)) {
+                    let (filled, whole) = fill(vec![], false, seed);
+                    if !whole {
+                        break;
+                    }
+                    let layout = layout_of(&filled);
+                    if layout.utilisation > best.utilisation + 1e-9 {
+                        on_progress(&layout);
+                        best = layout;
+                    }
+                }
+            }
+            best
         }
     })
 }
@@ -521,7 +559,7 @@ fn fits_across(contour: &[[f64; 2]], allow_rotation: bool, width: f64) -> bool {
 }
 
 /// Runs sparrow until `deadline` or `cancel`, passing each feasible solution it reaches, every one
-/// narrower than the last, to `on_solution`.
+/// narrower than the last, to `on_solution`, and counting its iterations in `iterations`.
 ///
 /// sparrow runs on its own thread: it checks for the end only between steps, and some steps take
 /// seconds on a crowded strip. This returns at the deadline or on cancel all the same, once there
@@ -533,6 +571,7 @@ fn strip_pack(
     seed: u64,
     deadline: Instant,
     cancel: &AtomicBool,
+    iterations: &AtomicU64,
     mut on_solution: impl FnMut(Solution),
 ) -> anyhow::Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
@@ -573,10 +612,11 @@ fn strip_pack(
     loop {
         // Wakes this often to notice the deadline or a cancel between solutions.
         match solutions.recv_timeout(Duration::from_millis(20)) {
-            Ok(solution) => {
+            Ok(Report::Solution(solution)) => {
                 solved = true;
                 on_solution(solution);
             }
+            Ok(Report::Iteration) => _ = iterations.fetch_add(1, Ordering::Relaxed),
             Err(RecvTimeoutError::Timeout) => {}
             // jagua-rs asserts on some degenerate input (10 mm squares, seed 2); that must not take
             // the caller down, nor lose the solutions so far.
@@ -597,18 +637,31 @@ fn strip_pack(
     }
 }
 
-/// Sends on the exploration's and compression's feasible solutions, each narrower than the last.
-struct Listener(mpsc::Sender<Solution>);
+enum Report {
+    Solution(Solution),
+    Iteration,
+}
+
+/// Sends on the exploration's and compression's feasible solutions, each narrower than the last,
+/// and each iteration of sparrow's separator.
+// Sends fail only once `strip_pack` has returned, and then nobody is listening.
+struct Listener(mpsc::Sender<Report>);
 
 impl SolutionListener for Listener {
     fn report(&mut self, report: ReportType, solution: &SPSolution) {
         if !matches!(report, ReportType::ExplFeas | ReportType::CmprFeas) {
             return;
         }
-        // Fails only once `strip_pack` has returned, and then nobody is listening.
-        _ = self
-            .0
-            .send(export(solution, *sparrow::EPOCH).layout.placed_items);
+        _ = self.0.send(Report::Solution(
+            export(solution, *sparrow::EPOCH).layout.placed_items,
+        ));
+    }
+
+    // Iteration zero is the layout before any.
+    fn report_separation_progress(&mut self, progress: SeparationProgress) {
+        if progress.iteration > 0 {
+            _ = self.0.send(Report::Iteration);
+        }
     }
 }
 

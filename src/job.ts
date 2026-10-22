@@ -32,11 +32,20 @@ export interface NestView {
   utilisation: number;
 }
 
-/** Resolves with the best Layout once the run ends; `onProgress` gets every improved one before. */
-export const nestJob = (job: JobRequest, onProgress: (view: NestView) => void) => {
-  const channel = new Channel<NestView>();
-  channel.onmessage = onProgress;
-  return invoke<NestView>("nest_job", { job, onProgress: channel });
+/**
+ * Resolves with the best Layout once the run ends; `onProgress` gets every improved one before, and
+ * `onIterations` the iterations tried so far, four times a second.
+ */
+export const nestJob = (
+  job: JobRequest,
+  onProgress: (view: NestView) => void,
+  onIterations: (iterations: number) => void,
+) => {
+  const progress = new Channel<NestView>();
+  progress.onmessage = onProgress;
+  const iterations = new Channel<number>();
+  iterations.onmessage = onIterations;
+  return invoke<NestView>("nest_job", { job, onProgress: progress, onIterations: iterations });
 };
 
 /** Ends the run in progress: `nestJob` then resolves with the best Layout so far. */

@@ -40,5 +40,10 @@
   "placedOf": "{{placed}} / {{quantity}}",
   "placedFill": "{{placed}} (relleno)",
   "exclude": "Excluir del resultado",
-  "stale": "Los ajustes cambiaron desde esta distribución. Pulsa Calcular para actualizarla."
+  "stale": "Los ajustes cambiaron desde esta distribución. Pulsa Calcular para actualizarla.",
+  "timeLeft_one": "Queda {{count}} s",
+  "timeLeft_other": "Quedan {{count}} s",
+  "finishing": "Terminando la primera distribución…",
+  "iterations_one": "{{count, number}} iteración",
+  "iterations_other": "{{count, number}} iteraciones"
 }

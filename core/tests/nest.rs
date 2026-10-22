@@ -5,7 +5,7 @@
 use argentajo_core::nest::Quantity::{Fill, Fixed};
 use argentajo_core::nest::{Job, JobItem, Layout, Paper, Placement, Quantity, nest, render_page};
 use argentajo_core::piece::{Piece, PrepareOptions, RealSize, prepare_piece};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const SEEDS: [u64; 2] = [1, 2];
@@ -220,7 +220,13 @@ fn nest_valid(job: &Job, seed: u64) -> Layout {
 }
 
 fn try_nest(job: &Job, seed: u64) -> Result<Layout, argentajo_core::nest::NestError> {
-    nest(job, seed, |_| {}, &AtomicBool::new(false))
+    nest(
+        job,
+        seed,
+        |_| {},
+        &AtomicBool::new(false),
+        &AtomicU64::new(0),
+    )
 }
 
 fn mixed_items() -> Vec<(Piece, Quantity)> {
@@ -388,21 +394,37 @@ fn renders_the_page_in_mm_with_every_placed_part() {
 
 #[test]
 fn reports_every_improved_layout_and_returns_the_best() {
-    let job = job([120.0, 70.0], mixed_items());
+    let mut items = mixed_items();
+    items.push((piece(vec![triangle()], true, true), Fill));
+    let job = job([120.0, 70.0], items);
     let mut reported = vec![];
+    let iterations = AtomicU64::new(0);
     let layout = nest(
         &job,
         1,
         |l| reported.push(l.clone()),
         &AtomicBool::new(false),
+        &iterations,
     )
     .unwrap();
     assert!(
         !reported.is_empty(),
         "at least the first layout is reported"
     );
+    assert!(
+        iterations.into_inner() > reported.len() as u64,
+        "sparrow's iterations are counted"
+    );
     for l in &reported {
         assert_valid(&job, l);
+    }
+    for pair in reported.windows(2) {
+        assert!(
+            pair[1].utilisation >= pair[0].utilisation - 1e-9,
+            "utilisation went down: {} then {}",
+            pair[0].utilisation,
+            pair[1].utilisation
+        );
     }
     assert_eq!(
         reported.last(),
@@ -425,6 +447,7 @@ fn cancelling_mid_run_returns_a_valid_layout() {
             cancel.store(true, Ordering::Relaxed);
         },
         &cancel,
+        &AtomicU64::new(0),
     )
     .unwrap();
     assert!(
@@ -447,6 +470,7 @@ fn never_runs_past_the_time_limit() {
         1,
         |_| _ = first.get_or_insert_with(|| start.elapsed()),
         &AtomicBool::new(false),
+        &AtomicU64::new(0),
     )
     .unwrap();
     // The first Layout is always waited for; there is nothing valid to return before it.
@@ -510,6 +534,41 @@ fn fill_respects_flags_and_parts_around_fixed_items() {
             layout.placed
         );
     }
+}
+
+#[test]
+fn fill_alone_keeps_improving_until_the_time_limit_and_repeats_with_the_seed() {
+    let mut job = job(
+        [100.0, 50.0],
+        vec![(piece(vec![triangle()], true, true), Fill)],
+    );
+    job.time_limit = Duration::from_secs(1);
+    let run = || {
+        let start = Instant::now();
+        let mut reported = vec![];
+        let iterations = AtomicU64::new(0);
+        let layout = nest(
+            &job,
+            1,
+            |l| reported.push(l.clone()),
+            &AtomicBool::new(false),
+            &iterations,
+        )
+        .unwrap();
+        assert!(iterations.into_inner() > 1, "one per fill");
+        assert_valid(&job, &layout);
+        assert!(
+            start.elapsed() >= job.time_limit,
+            "stopped after {:?}",
+            start.elapsed()
+        );
+        assert_eq!(reported.last(), Some(&layout));
+        for pair in reported.windows(2) {
+            assert!(pair[1].utilisation > pair[0].utilisation);
+        }
+        reported
+    };
+    assert_eq!(run()[0], run()[0], "same seed, same first layout");
 }
 
 #[test]
