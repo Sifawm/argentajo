@@ -116,6 +116,14 @@ const toMeasure = (
   return size.side === "width" ? { width: mm } : { height: mm };
 };
 
+/** Reorders `sizes` so the default Size is first, keeping the rest in their current order. */
+const withDefaultFirst = (sizes: EditorSize[], defaultSizeId: string | undefined): EditorSize[] => {
+  if (!defaultSizeId) return sizes;
+  const index = sizes.findIndex((s) => s.id === defaultSizeId);
+  if (index <= 0) return sizes;
+  return [sizes[index], ...sizes.slice(0, index), ...sizes.slice(index + 1)];
+};
+
 const initialSizes = (
   savedSizes: SizeInput[] | undefined,
   unit: Parameters<typeof toUnit>[1],
@@ -265,11 +273,18 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
   const [tolerance, setTolerance] = useState(saved?.options.tolerance ?? 32);
   const [editorInitial] = useState(() => {
     const sizes = initialSizes(saved?.options.sizes, unit);
-    return { sizes, selectedSizeId: sizes[0]?.id };
+    return {
+      sizes,
+      selectedSizeId: sizes[0]?.id,
+      defaultSizeId: saved?.options.sizes[0]?.id ?? sizes[0]?.id,
+    };
   });
   const [sizes, setSizes] = useState<EditorSize[]>(editorInitial.sizes);
   const [selectedSizeId, setSelectedSizeId] = useState<string | undefined>(
     editorInitial.selectedSizeId,
+  );
+  const [defaultSizeId, setDefaultSizeId] = useState<string | undefined>(
+    editorInitial.defaultSizeId,
   );
   const [allowRotation, setAllowRotation] = useState(saved?.options.allowRotation ?? true);
   const [allowMirror, setAllowMirror] = useState(saved?.options.allowMirror ?? false);
@@ -327,11 +342,16 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     return () => URL.revokeObjectURL(url);
   }, [image, type]);
 
-  // Keep the selected size valid when rows are deleted or reordered.
+  // Keep the selected and default sizes valid when rows are deleted or reordered.
   useEffect(() => {
     if (selectedSizeId && sizes.some((s) => s.id === selectedSizeId)) return;
     setSelectedSizeId(sizes[0]?.id);
   }, [sizes, selectedSizeId]);
+
+  useEffect(() => {
+    if (defaultSizeId && sizes.some((s) => s.id === defaultSizeId)) return;
+    setDefaultSizeId(sizes[0]?.id);
+  }, [sizes, defaultSizeId]);
 
   const validationErrors = useMemo(() => {
     const errors: Record<string, string> = {};
@@ -356,28 +376,38 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     return errors;
   }, [sizes, unit, t]);
 
+  // `core` expects the Default size first; the editor keeps the user's order, so we reorder on save/preview.
+  const orderedSizes = useMemo(
+    () => withDefaultFirst(sizes, defaultSizeId),
+    [sizes, defaultSizeId],
+  );
+
   const options = useMemo<PrepareOptions>(
     () => ({
       tolerance,
-      sizes: sizes.map((s) => ({ id: s.id, name: s.name.trim(), measure: toMeasure(s, unit) })),
+      sizes: orderedSizes.map((s) => ({
+        id: s.id,
+        name: s.name.trim(),
+        measure: toMeasure(s, unit),
+      })),
       allowRotation,
       allowMirror,
     }),
-    [tolerance, sizes, unit, allowRotation, allowMirror],
+    [tolerance, orderedSizes, unit, allowRotation, allowMirror],
   );
 
   // The preview follows the selected Size, not the Default size: reorder so the selected one is
   // first, because `core` prepares the Piece at the first Size.
   const previewOptions = useMemo<PrepareOptions>(() => {
     if (!selectedSizeId) return options;
-    const selectedIndex = sizes.findIndex((s) => s.id === selectedSizeId);
+    const selectedIndex = orderedSizes.findIndex((s) => s.id === selectedSizeId);
     if (selectedIndex <= 0) return options;
-    const reordered = arrayMove(sizes, selectedIndex, 0);
+    const reordered = arrayMove(orderedSizes, selectedIndex, 0);
     return {
       ...options,
       sizes: reordered.map((s) => ({ id: s.id, name: s.name.trim(), measure: toMeasure(s, unit) })),
     };
-  }, [options, sizes, selectedSizeId, unit]);
+  }, [options, orderedSizes, selectedSizeId, unit]);
 
   // Decoded by `core` (SVGs rasterised), so the overlay and the edits share its pixel grid.
   const [sourceW, sourceH] = preview?.sourcePx ?? [];
@@ -830,12 +860,7 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
   };
 
   const makeDefault = (id: string) => {
-    setSizes((sizes) => {
-      const index = sizes.findIndex((s) => s.id === id);
-      if (index <= 0) return sizes;
-      const moved = sizes[index];
-      return [moved, ...sizes.slice(0, index), ...sizes.slice(index + 1)];
-    });
+    setDefaultSizeId(id);
   };
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
@@ -853,6 +878,14 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
   const deleteSize = (id: string) => {
     if (sizes.length <= 1) return;
     setSizes((sizes) => sizes.filter((s) => s.id !== id));
+    if (defaultSizeId === id) {
+      const nextDefault = sizes.find((s) => s.id !== id);
+      setDefaultSizeId(nextDefault?.id);
+    }
+    if (selectedSizeId === id) {
+      const nextSelected = sizes.find((s) => s.id !== id);
+      setSelectedSizeId(nextSelected?.id);
+    }
   };
 
   const addSize = () => {
@@ -1027,12 +1060,12 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
                     strategy={verticalListSortingStrategy}
                   >
                     <div className="flex max-h-56 flex-col gap-2 overflow-y-auto">
-                      {sizes.map((size, index) => (
+                      {sizes.map((size) => (
                         <SortableSizeItem
                           key={size.id}
                           size={size}
                           selected={size.id === selectedSizeId}
-                          isDefault={index === 0}
+                          isDefault={size.id === defaultSizeId}
                           canDelete={sizes.length > 1}
                           unit={unit}
                           error={validationErrors[size.id]}
