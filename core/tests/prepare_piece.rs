@@ -12,7 +12,8 @@
 //! - `two_parts_rotated.jpg`: `two_parts.png` stored as is, with EXIF orientation 6 (rotate 90° clockwise).
 
 use argentajo_core::piece::{
-    Piece, PrepareError, PrepareOptions, RealSize, prepare_piece, split_piece,
+    NORMAL_SIZE_ID, Piece, PrepareError, PrepareOptions, RealSize, SizeInput, piece_at_size,
+    prepare_piece, split_piece,
 };
 use image::{ImageFormat, Rgba, RgbaImage};
 use std::io::Cursor;
@@ -31,9 +32,31 @@ fn prepare(name: &str, options: PrepareOptions) -> Piece {
 
 fn width(mm: f64) -> PrepareOptions {
     PrepareOptions {
-        size: Some(RealSize::Width(mm)),
+        sizes: vec![SizeInput {
+            id: NORMAL_SIZE_ID.into(),
+            name: "Normal".into(),
+            measure: Some(RealSize::Width(mm)),
+        }],
         ..Default::default()
     }
+}
+
+fn sized(name: &str, sizes: &[(f64, &str, &str)]) -> Piece {
+    prepare_piece(
+        &fixture(name),
+        &PrepareOptions {
+            sizes: sizes
+                .iter()
+                .map(|&(mm, id, name)| SizeInput {
+                    id: id.into(),
+                    name: name.into(),
+                    measure: Some(RealSize::Width(mm)),
+                })
+                .collect(),
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }
 
 fn alpha_at(piece: &Piece, x: u32, y: u32) -> u8 {
@@ -102,7 +125,11 @@ fn the_other_side_follows_the_proportions() {
     let by_height = prepare(
         "flower_on_white.png",
         PrepareOptions {
-            size: Some(RealSize::Height(27.77)),
+            sizes: vec![SizeInput {
+                id: NORMAL_SIZE_ID.into(),
+                name: "Normal".into(),
+                measure: Some(RealSize::Height(27.77)),
+            }],
             ..Default::default()
         },
     );
@@ -554,5 +581,72 @@ fn a_split_piece_reopens_from_its_cleaned_image_at_its_real_size() {
             (reopened.allow_rotation, reopened.allow_mirror),
             (false, true)
         );
+    }
+}
+
+#[test]
+fn each_size_yields_its_measure_and_the_other_side_is_proportional() {
+    let piece = sized(
+        "flower_on_white.png",
+        &[(30.0, "s30", "Small"), (60.0, "s60", "Large")],
+    );
+    let small = piece_at_size(&piece, "s30").unwrap();
+    assert_eq!(small.size_mm[0], 30.0);
+    assert_near(small.size_mm[1], 27.77, 0.4);
+
+    let large = piece_at_size(&piece, "s60").unwrap();
+    assert_eq!(large.size_mm[0], 60.0);
+    assert_near(large.size_mm[1], 55.54, 0.8);
+}
+
+#[test]
+fn the_contour_scales_uniformly_to_each_size() {
+    let piece = sized(
+        "flower_on_white.png",
+        &[(30.0, "s30", "Small"), (60.0, "s60", "Large")],
+    );
+    let default_area = polygon_area(only_contour(&piece));
+    let large = piece_at_size(&piece, "s60").unwrap();
+    let large_area = polygon_area(only_contour(&large));
+    assert_near(large_area / default_area, 4.0, 0.05);
+}
+
+#[test]
+fn a_larger_size_warns_low_resolution_while_a_smaller_one_does_not() {
+    let px = prepare("flower_on_white.png", width(30.0)).size_px[0] as f64;
+    let at_150_ppi = px / 150.0 * 25.4;
+    let piece = sized(
+        "flower_on_white.png",
+        &[
+            (30.0, "s30", "Default"),
+            (at_150_ppi + 1.0, "large", "Large"),
+            (at_150_ppi / 2.0 - 0.1, "small", "Small"),
+        ],
+    );
+    assert!(!piece_at_size(&piece, "s30").unwrap().low_resolution);
+    assert!(piece_at_size(&piece, "large").unwrap().low_resolution);
+    assert!(!piece_at_size(&piece, "small").unwrap().low_resolution);
+}
+
+#[test]
+fn a_piece_json_without_sizes_reads_as_one_normal_size() {
+    let piece = prepare("flower_on_white.png", width(30.0));
+    let mut value = serde_json::to_value(&piece).unwrap();
+    value.as_object_mut().unwrap().remove("sizes");
+    let decoded: Piece = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.sizes.len(), 1);
+    assert_eq!(decoded.sizes[0].id, NORMAL_SIZE_ID);
+    assert_eq!(decoded.sizes[0].name, "Normal");
+    assert_eq!(decoded.sizes[0].measure, RealSize::Width(piece.size_mm[0]));
+}
+
+#[test]
+fn split_yields_pieces_with_one_normal_size() {
+    let pieces = split_piece(&fixture("two_parts.png"), &width(17.0)).unwrap();
+    for piece in pieces {
+        assert_eq!(piece.sizes.len(), 1);
+        assert_eq!(piece.sizes[0].id, NORMAL_SIZE_ID);
+        assert_eq!(piece.sizes[0].name, "Normal");
+        assert_eq!(piece.sizes[0].measure, RealSize::Width(piece.size_mm[0]));
     }
 }
