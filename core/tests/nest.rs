@@ -752,3 +752,21 @@ fn fill_uses_every_sheet() {
         layout.placed
     );
 }
+
+#[test]
+fn sheets_left_empty_do_not_cut_the_first_one_short() {
+    // Twenty Ls take about two fifths of the first Sheet; sparrow keeps improving them for seconds.
+    let ells = (piece(vec![ell()], true, false), Fixed(20));
+    let mut job = job([120.0, 70.0], vec![ells]);
+    job.sheets_mm = vec![[120.0, 70.0]; 3];
+    job.time_limit = Duration::from_secs(3);
+    let start = Instant::now();
+    let layout = nest_valid(&job, 1);
+    assert_eq!(layout.missing, [0]);
+    assert!(layout.sheets[1].placements.is_empty());
+    assert!(
+        start.elapsed() > job.time_limit * 2 / 3,
+        "stopped after {:?}: the first Sheet only got its share of three",
+        start.elapsed()
+    );
+}

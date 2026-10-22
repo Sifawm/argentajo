@@ -194,12 +194,37 @@ pub fn nest(
     let mut area = 0.0;
     // Still to place.
     let mut quantities: Vec<Quantity> = job.items.iter().map(|item| item.quantity).collect();
-    // ponytail: each Sheet keeps its best before the next starts, with an equal share of the time
-    // left; nest them together if one Sheet's choice ever starves the next.
+    // Each Sheet keeps its best before the next starts, with an equal share of the time left among
+    // the Sheets the fixed copies still to place need, or, once there are none, all those left for
+    // fill. Time a Sheet doesn't use goes to the next.
+    // ponytail: the Sheets needed are counted by area, as if the copies packed with no gaps, so a
+    // Sheet the copies overflow onto may get only its first Layout; estimate with the density
+    // sparrow reaches if those Sheets come out loose.
     for (s, &sheet) in sheets.iter().enumerate() {
+        let mut to_place: f64 = job
+            .items
+            .iter()
+            .zip(&quantities)
+            .map(|(item, quantity)| {
+                let area: f64 = item.piece.contours.iter().map(|c| polygon_area(c)).sum();
+                quantity.fixed() as f64 * area
+            })
+            .sum();
+        let mut needed = 0;
+        for &[w, h] in &sheets[s..] {
+            if to_place <= 0.0 {
+                break;
+            }
+            let usable =
+                (w - 2.0 * job.edge_margin_mm).max(0.0) * (h - 2.0 * job.edge_margin_mm).max(0.0);
+            to_place -= usable;
+            needed += 1;
+        }
+        if needed == 0 {
+            needed = sheets.len() - s;
+        }
         let now = Instant::now();
-        let sheet_deadline =
-            now + deadline.saturating_duration_since(now) / (sheets.len() - s) as u32;
+        let sheet_deadline = now + deadline.saturating_duration_since(now) / needed as u32;
         let with = |nested: &Nested| {
             let mut next = layout.clone();
             next.sheets[s].placements = nested.placements.clone();
