@@ -124,6 +124,137 @@ const initialSizes = (
   return [{ id: newId(), name: "Normal", side: "width", text: "" }];
 };
 
+interface SortableSizeItemProps {
+  size: EditorSize;
+  selected: boolean;
+  isDefault: boolean;
+  canDelete: boolean;
+  unit: Parameters<typeof toUnit>[1];
+  error?: string;
+  onSelect: () => void;
+  onMakeDefault: () => void;
+  onUpdate: (patch: Partial<EditorSize>) => void;
+  onDelete: () => void;
+}
+
+const SortableSizeItem = ({
+  size,
+  selected,
+  isDefault,
+  canDelete,
+  unit,
+  error,
+  onSelect,
+  onMakeDefault,
+  onUpdate,
+  onDelete,
+}: SortableSizeItemProps) => {
+  const { t } = useTranslation("library");
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: size.id,
+  });
+  const style = { transform: CSS.Transform.toString(transform), transition };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`group flex items-start gap-2 rounded-md border border-zinc-200 p-2 transition-colors ${
+        selected ? "border-l-2 border-l-zinc-900 bg-zinc-50" : ""
+      } ${isDragging ? "opacity-50" : ""}`}
+    >
+      <button
+        type="button"
+        {...attributes}
+        {...listeners}
+        aria-label={t("dragSize")}
+        title={t("dragSize")}
+        className="mt-1 shrink-0 cursor-grab text-zinc-400 hover:text-zinc-700 active:cursor-grabbing"
+      >
+        <GripVertical aria-hidden className="size-5" />
+      </button>
+      <input
+        type="radio"
+        name="selectedSize"
+        checked={selected}
+        onChange={onSelect}
+        aria-label={t("size")}
+        className="mt-2 shrink-0"
+      />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onMakeDefault}
+            disabled={isDefault}
+            aria-label={isDefault ? t("defaultSize") : t("makeDefault")}
+            title={isDefault ? t("defaultSize") : t("makeDefault")}
+            className={`shrink-0 rounded-md p-1 ${
+              isDefault ? "text-amber-500" : "text-zinc-400 hover:text-zinc-700"
+            }`}
+          >
+            <Bookmark aria-hidden className="size-4" fill={isDefault ? "currentColor" : "none"} />
+          </button>
+          <input
+            type="text"
+            value={size.name}
+            onChange={(e) => onUpdate({ name: e.target.value })}
+            aria-label={t("sizeName")}
+            className="min-w-0 flex-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="flex shrink-0 overflow-hidden rounded-md border border-zinc-300">
+            <button
+              type="button"
+              title={t("width", { unit })}
+              onClick={() => onUpdate({ side: "width" })}
+              className={`px-2 py-1 text-xs ${
+                size.side === "width" ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-100"
+              }`}
+            >
+              ↔
+            </button>
+            <button
+              type="button"
+              title={t("height", { unit })}
+              onClick={() => onUpdate({ side: "height" })}
+              className={`px-2 py-1 text-xs ${
+                size.side === "height" ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-100"
+              }`}
+            >
+              ↕
+            </button>
+          </div>
+          <input
+            type="number"
+            min="0"
+            step="0.1"
+            value={size.text}
+            onChange={(e) => onUpdate({ text: e.target.value })}
+            aria-label={t(size.side, { unit })}
+            className="w-24 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+          />
+        </div>
+        {error && <p className="text-xs text-red-700">{error}</p>}
+      </div>
+      <div className="flex w-8 shrink-0 items-center justify-center self-stretch">
+        {canDelete && (
+          <button
+            type="button"
+            onClick={onDelete}
+            aria-label={t("deleteSize")}
+            title={t("deleteSize")}
+            className="rounded-md p-1.5 text-zinc-400 opacity-0 transition-opacity duration-150 hover:text-red-700 group-hover:opacity-100"
+          >
+            <Trash2 aria-hidden className="size-4" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
+
 export default function PieceEditor({ image, type, saved, onClose, onSaved }: Props) {
   const { t } = useTranslation("library");
   // The editor is modal, so the unit can't change under the typed sizes.
@@ -736,122 +867,6 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
   const cursorOverlayVisible = !isPanning && cursorVisible && !!tool;
   const hasErrors = Object.keys(validationErrors).length > 0;
 
-  const SortableSizeItem = ({
-    size,
-    selected,
-    isDefault,
-  }: {
-    size: EditorSize;
-    selected: boolean;
-    isDefault: boolean;
-  }) => {
-    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-      id: size.id,
-    });
-    const style = { transform: CSS.Transform.toString(transform), transition };
-
-    return (
-      <div
-        ref={setNodeRef}
-        style={style}
-        className={`group flex items-start gap-2 rounded-md border border-zinc-200 p-2 transition-colors ${
-          selected ? "border-l-2 border-l-zinc-900 bg-zinc-50" : ""
-        } ${isDragging ? "opacity-50" : ""}`}
-      >
-        <button
-          type="button"
-          {...attributes}
-          {...listeners}
-          aria-label={t("dragSize")}
-          title={t("dragSize")}
-          className="mt-1 shrink-0 cursor-grab text-zinc-400 hover:text-zinc-700 active:cursor-grabbing"
-        >
-          <GripVertical aria-hidden className="size-5" />
-        </button>
-        <input
-          type="radio"
-          name="selectedSize"
-          checked={selected}
-          onChange={() => setSelectedSizeId(size.id)}
-          aria-label={t("size")}
-          className="mt-2 shrink-0"
-        />
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => makeDefault(size.id)}
-              disabled={isDefault}
-              aria-label={isDefault ? t("defaultSize") : t("makeDefault")}
-              title={isDefault ? t("defaultSize") : t("makeDefault")}
-              className={`shrink-0 rounded-md p-1 ${
-                isDefault ? "text-amber-500" : "text-zinc-400 hover:text-zinc-700"
-              }`}
-            >
-              <Bookmark aria-hidden className="size-4" fill={isDefault ? "currentColor" : "none"} />
-            </button>
-            <input
-              type="text"
-              value={size.name}
-              onChange={(e) => updateSize(size.id, { name: e.target.value })}
-              aria-label={t("sizeName")}
-              className="min-w-0 flex-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
-            />
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="flex shrink-0 overflow-hidden rounded-md border border-zinc-300">
-              <button
-                type="button"
-                title={t("width", { unit })}
-                onClick={() => updateSize(size.id, { side: "width" })}
-                className={`px-2 py-1 text-xs ${
-                  size.side === "width" ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-100"
-                }`}
-              >
-                ↔
-              </button>
-              <button
-                type="button"
-                title={t("height", { unit })}
-                onClick={() => updateSize(size.id, { side: "height" })}
-                className={`px-2 py-1 text-xs ${
-                  size.side === "height" ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-100"
-                }`}
-              >
-                ↕
-              </button>
-            </div>
-            <input
-              type="number"
-              min="0"
-              step="0.1"
-              value={size.text}
-              onChange={(e) => updateSize(size.id, { text: e.target.value })}
-              aria-label={t(size.side, { unit })}
-              className="w-24 rounded-md border border-zinc-300 px-2 py-1 text-sm"
-            />
-          </div>
-          {validationErrors[size.id] && (
-            <p className="text-xs text-red-700">{validationErrors[size.id]}</p>
-          )}
-        </div>
-        <div className="flex w-8 shrink-0 items-center justify-center self-stretch">
-          {sizes.length > 1 && (
-            <button
-              type="button"
-              onClick={() => deleteSize(size.id)}
-              aria-label={t("deleteSize")}
-              title={t("deleteSize")}
-              className="rounded-md p-1.5 text-zinc-400 opacity-0 transition-opacity duration-150 hover:text-red-700 group-hover:opacity-100"
-            >
-              <Trash2 aria-hidden className="size-4" />
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  };
-
   return (
     <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
       <Dialog.Portal>
@@ -1011,6 +1026,13 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
                           size={size}
                           selected={size.id === selectedSizeId}
                           isDefault={index === 0}
+                          canDelete={sizes.length > 1}
+                          unit={unit}
+                          error={validationErrors[size.id]}
+                          onSelect={() => setSelectedSizeId(size.id)}
+                          onMakeDefault={() => makeDefault(size.id)}
+                          onUpdate={(patch) => updateSize(size.id, patch)}
+                          onDelete={() => deleteSize(size.id)}
                         />
                       ))}
                     </div>
