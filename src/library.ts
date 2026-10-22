@@ -17,6 +17,26 @@ export interface SizeInput {
 /** Well-known id for the backward-compatible Normal size. */
 export const NORMAL_SIZE_ID = "normal";
 
+/** Minimum effective ppi before a Size is flagged as low resolution. Kept in sync with core. */
+export const MIN_PPI = 150;
+
+/**
+ * Computes the real dimensions of `piece` at `sizeId`. The Default size returns the piece's own
+ * `sizeMm`; other Sizes are scaled uniformly by their measure against the Default size.
+ */
+export const sizeDimensions = (piece: PieceView, sizeId: string): [number, number] | undefined => {
+  const size = piece.sizes.find((s) => s.id === sizeId);
+  if (!size) return undefined;
+  const [w, h] = piece.sizeMm;
+  if (sizeId === piece.sizes[0]?.id) return [w, h];
+  const scale = size.measure
+    ? "width" in size.measure
+      ? size.measure.width / w
+      : size.measure.height / h
+    : 1;
+  return [w * scale, h * scale];
+};
+
 /** Mirrors `core::piece::PrepareOptions`. Sizes are in mm. */
 export interface PrepareOptions {
   tolerance: number;

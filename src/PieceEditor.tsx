@@ -3,6 +3,7 @@ import {
   Eraser,
   Maximize,
   Redo2,
+  Trash2,
   TriangleAlert,
   Undo2,
   ZoomIn,
@@ -22,10 +23,12 @@ import { useTranslation } from "react-i18next";
 import {
   addToLibrary,
   type Edits,
+  MIN_PPI,
   type PieceView,
   type PrepareOptions,
   previewPiece,
   splitToLibrary,
+  type SizeInput,
   updatePiece,
 } from "./library";
 import { formatSize, fromUnit, toUnit, usePreferences } from "./preferences";
@@ -51,22 +54,72 @@ interface Props {
   onSaved: (pieces: PieceView[]) => void;
 }
 
+type EditorSize = {
+  id: string;
+  name: string;
+  side: Side;
+  /** Typed measure in the display unit; empty means "derive from the image" (only valid for the first size). */
+  text: string;
+};
+
+const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const formatMeasure = (mm: number, unit: Parameters<typeof toUnit>[1]) =>
+  String(Number(toUnit(mm, unit).toFixed(2)));
+
+const toEditorSize = (size: SizeInput, unit: Parameters<typeof toUnit>[1]): EditorSize => {
+  if (size.measure) {
+    return "width" in size.measure
+      ? {
+          id: size.id,
+          name: size.name,
+          side: "width",
+          text: formatMeasure(size.measure.width, unit),
+        }
+      : {
+          id: size.id,
+          name: size.name,
+          side: "height",
+          text: formatMeasure(size.measure.height, unit),
+        };
+  }
+  return { id: size.id, name: size.name, side: "width", text: "" };
+};
+
+const toMeasure = (
+  size: EditorSize,
+  unit: Parameters<typeof fromUnit>[1],
+): SizeInput["measure"] => {
+  const text = size.text.trim();
+  if (text === "") return undefined;
+  const value = Number(text);
+  if (Number.isNaN(value)) return undefined;
+  const mm = fromUnit(value, unit);
+  if (!(mm > 0)) return undefined;
+  return size.side === "width" ? { width: mm } : { height: mm };
+};
+
+const initialSizes = (
+  savedSizes: SizeInput[] | undefined,
+  unit: Parameters<typeof toUnit>[1],
+): EditorSize[] => {
+  if (savedSizes && savedSizes.length > 0) return savedSizes.map((s) => toEditorSize(s, unit));
+  return [{ id: newId(), name: "Normal", side: "width", text: "" }];
+};
+
 export default function PieceEditor({ image, type, saved, onClose, onSaved }: Props) {
   const { t } = useTranslation("library");
-  // The editor is modal, so the unit can't change under the typed size.
+  // The editor is modal, so the unit can't change under the typed sizes.
   const { unit } = usePreferences();
   const [tolerance, setTolerance] = useState(saved?.options.tolerance ?? 32);
-  // The side the jeweller typed, in the display unit; the other one follows the proportions. Until
-  // then, `core` takes the size from the file's DPI.
-  const [size, setSize] = useState<{ side: Side; text: string } | undefined>(() => {
-    const realSize = saved?.options.size;
-    if (!realSize) return undefined;
-    // Shown like the computed side; a split piece's width is a long fraction.
-    const text = (mm: number) => String(Number(toUnit(mm, unit).toFixed(2)));
-    return "width" in realSize
-      ? { side: "width", text: text(realSize.width) }
-      : { side: "height", text: text(realSize.height) };
+  const [editorInitial] = useState(() => {
+    const sizes = initialSizes(saved?.options.sizes, unit);
+    return { sizes, selectedSizeId: sizes[0]?.id };
   });
+  const [sizes, setSizes] = useState<EditorSize[]>(editorInitial.sizes);
+  const [selectedSizeId, setSelectedSizeId] = useState<string | undefined>(
+    editorInitial.selectedSizeId,
+  );
   const [allowRotation, setAllowRotation] = useState(saved?.options.allowRotation ?? true);
   const [allowMirror, setAllowMirror] = useState(saved?.options.allowMirror ?? false);
   const [preview, setPreview] = useState<PieceView>();
@@ -82,7 +135,6 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
   const [cursorVisible, setCursorVisible] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [spacePressed, setSpacePressed] = useState(false);
-  const [isSizing, setIsSizing] = useState(false);
   const [, setHistoryTick] = useState(0);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -124,13 +176,40 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     return () => URL.revokeObjectURL(url);
   }, [image, type]);
 
-  const side = size?.side;
-  const mm = fromUnit(Number(size?.text), unit);
-  const options = useMemo<PrepareOptions | undefined>(() => {
-    if (side && !(mm > 0)) return undefined;
-    const realSize = side === "width" ? { width: mm } : side === "height" ? { height: mm } : null;
-    return { tolerance, size: realSize, allowRotation, allowMirror };
-  }, [tolerance, side, mm, allowRotation, allowMirror]);
+  // Keep the selected size valid when rows are deleted or reordered.
+  useEffect(() => {
+    if (selectedSizeId && sizes.some((s) => s.id === selectedSizeId)) return;
+    setSelectedSizeId(sizes[0]?.id);
+  }, [sizes, selectedSizeId]);
+
+  const validationErrors = useMemo(() => {
+    const errors: Record<string, string> = {};
+    const seen = new Set<string>();
+    sizes.forEach((size, index) => {
+      const trimmed = size.name.trim();
+      if (trimmed === "") {
+        errors[size.id] = t("emptySizeName");
+      } else if ([...seen].some((n) => n.toLowerCase() === trimmed.toLowerCase())) {
+        errors[size.id] = t("duplicateSizeName");
+      }
+      seen.add(trimmed);
+      if (index > 0 && !toMeasure(size, unit)) {
+        errors[size.id] = t("sizeMeasure");
+      }
+    });
+    return errors;
+  }, [sizes, unit, t]);
+
+  const options = useMemo<PrepareOptions>(
+    () => ({
+      tolerance,
+      sizes: sizes.map((s) => ({ id: s.id, name: s.name.trim(), measure: toMeasure(s, unit) })),
+      allowRotation,
+      allowMirror,
+    }),
+    [tolerance, sizes, unit, allowRotation, allowMirror],
+  );
+
   // Decoded by `core` (SVGs rasterised), so the overlay and the edits share its pixel grid.
   const [sourceW, sourceH] = preview?.sourcePx ?? [];
 
@@ -184,7 +263,6 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
 
   // Re-prepare live, debounced so dragging the slider doesn't queue up a run per step.
   useEffect(() => {
-    if (!options) return;
     let stale = false;
     const timer = setTimeout(() => {
       previewPiece(image, options, edits).then(
@@ -245,17 +323,30 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     setEdits(next);
   };
 
+  const optionsForSave = (defaultSizeMm: [number, number]): PrepareOptions => {
+    const fallbackWidth = defaultSizeMm[0];
+    return {
+      tolerance,
+      sizes: sizes.map((s) => {
+        const measure = toMeasure(s, unit);
+        return { id: s.id, name: s.name.trim(), measure: measure ?? { width: fallbackWidth } };
+      }),
+      allowRotation,
+      allowMirror,
+    };
+  };
+
   const accept = (split: boolean) => {
-    if (!options) return;
+    if (!preview) return;
+    const saveOptions = optionsForSave(preview.sizeMm);
     setSaving(true);
-    // Exported afresh: the last stroke's preview may still be pending.
     void exportEdits()
       .then((edits) =>
         split
-          ? splitToLibrary(image, options, edits)
+          ? splitToLibrary(image, saveOptions, edits)
           : (saved
-              ? updatePiece(saved.id, image, type, options, edits)
-              : addToLibrary(image, type, options, edits)
+              ? updatePiece(saved.id, image, type, saveOptions, edits)
+              : addToLibrary(image, type, saveOptions, edits)
             ).then((piece) => [piece]),
       )
       .then(onSaved, (e) => {
@@ -565,29 +656,51 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     </button>
   );
 
-  const sizeInput = (inputSide: Side, index: 0 | 1) => (
-    <label className="flex flex-col gap-1 text-sm">
-      {t(inputSide, { unit })}
-      <input
-        type="number"
-        min="0"
-        step="0.1"
-        value={
-          size?.side === inputSide
-            ? size.text
-            : preview
-              ? toUnit(preview.sizeMm[index], unit).toFixed(2)
-              : ""
-        }
-        onChange={(e) => setSize({ side: inputSide, text: e.target.value })}
-        className="w-28 rounded-md border border-zinc-300 px-2 py-1"
-      />
-    </label>
-  );
+  const updateSize = (id: string, patch: Partial<EditorSize>) => {
+    setSizes((sizes) => sizes.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  };
 
-  const cursorOverlayVisible = !isPanning && ((cursorVisible && !!tool) || isSizing);
-  const centerX = (containerRef.current?.clientWidth ?? 0) / 2 - PADDING;
-  const centerY = (containerRef.current?.clientHeight ?? 0) / 2 - PADDING;
+  const makeDefault = (id: string) => {
+    setSizes((sizes) => {
+      const index = sizes.findIndex((s) => s.id === id);
+      if (index <= 0) return sizes;
+      const moved = sizes[index];
+      return [moved, ...sizes.slice(0, index), ...sizes.slice(index + 1)];
+    });
+  };
+
+  const deleteSize = (id: string) => {
+    if (sizes.length <= 1) return;
+    setSizes((sizes) => sizes.filter((s) => s.id !== id));
+  };
+
+  const addSize = () => {
+    const n = sizes.length + 1;
+    const size: EditorSize = {
+      id: newId(),
+      name: t("newSizeName", { n }),
+      side: "width",
+      text: "",
+    };
+    setSizes((sizes) => [...sizes, size]);
+    setSelectedSizeId(size.id);
+  };
+
+  const selectedSize = sizes.find((s) => s.id === selectedSizeId);
+  const selectedDims = useMemo<[number, number] | undefined>(() => {
+    if (!preview) return undefined;
+    const [w, h] = preview.sizeMm;
+    const measure = selectedSize ? toMeasure(selectedSize, unit) : undefined;
+    if (!measure) return [w, h];
+    const scale = "width" in measure ? measure.width / w : measure.height / h;
+    return [w * scale, h * scale];
+  }, [preview, selectedSize, unit]);
+
+  const selectedPpi =
+    preview && selectedDims ? preview.ppi / (selectedDims[0] / preview.sizeMm[0]) : undefined;
+
+  const cursorOverlayVisible = !isPanning && cursorVisible && !!tool;
+  const hasErrors = Object.keys(validationErrors).length > 0;
 
   return (
     <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
@@ -666,14 +779,13 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
                       height="100%"
                     >
                       {cursorVisible && cursor && renderCursor(cursor.x, cursor.y)}
-                      {isSizing && renderCursor(centerX, centerY)}
                     </svg>
                   )}
                 </>
               )}
             </div>
 
-            <div className="flex w-64 flex-col gap-5">
+            <div className="flex w-72 flex-col gap-5">
               <label className="flex flex-col gap-2 text-sm">
                 <span>
                   {t("tolerance")}: {tolerance}
@@ -716,8 +828,8 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
                   MIN_BRUSH,
                   MAX_BRUSH,
                   setBrushSizeAndRef,
-                  () => setIsSizing(true),
-                  () => setIsSizing(false),
+                  () => {},
+                  () => {},
                 )}
                 <span className="text-xs text-zinc-500">{t("toolsHint")}</span>
               </div>
@@ -731,20 +843,108 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
                 </div>
               </div>
 
-              <div className="flex gap-3">
-                {sizeInput("width", 0)}
-                {sizeInput("height", 1)}
+              <div className="flex flex-col gap-2">
+                <span className="text-sm">{t("sizes")}</span>
+                <div className="flex max-h-56 flex-col gap-2 overflow-y-auto">
+                  {sizes.map((size, index) => {
+                    const selected = size.id === selectedSizeId;
+                    return (
+                      <div
+                        key={size.id}
+                        className={`flex flex-col gap-1 rounded-md border p-2 ${selected ? "border-zinc-900 bg-zinc-50" : "border-zinc-200"}`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="radio"
+                            name="selectedSize"
+                            checked={selected}
+                            onChange={() => setSelectedSizeId(size.id)}
+                            aria-label={t("size")}
+                            className="shrink-0"
+                          />
+                          <input
+                            type="text"
+                            value={size.name}
+                            onChange={(e) => updateSize(size.id, { name: e.target.value })}
+                            aria-label={t("sizeName")}
+                            className="min-w-0 flex-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+                          />
+                          <div className="flex shrink-0 overflow-hidden rounded-md border border-zinc-300">
+                            <button
+                              type="button"
+                              title={t("width", { unit })}
+                              onClick={() => updateSize(size.id, { side: "width" })}
+                              className={`px-2 py-1 text-xs ${size.side === "width" ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-100"}`}
+                            >
+                              ↔
+                            </button>
+                            <button
+                              type="button"
+                              title={t("height", { unit })}
+                              onClick={() => updateSize(size.id, { side: "height" })}
+                              className={`px-2 py-1 text-xs ${size.side === "height" ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-100"}`}
+                            >
+                              ↕
+                            </button>
+                          </div>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.1"
+                            value={size.text}
+                            onChange={(e) => updateSize(size.id, { text: e.target.value })}
+                            aria-label={t(size.side, { unit })}
+                            className="w-20 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => makeDefault(size.id)}
+                            disabled={index === 0}
+                            title={t("makeDefault")}
+                            className="shrink-0 rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-100 disabled:opacity-40"
+                          >
+                            {t("makeDefault")}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteSize(size.id)}
+                            disabled={sizes.length <= 1}
+                            aria-label={t("deleteSize")}
+                            title={t("deleteSize")}
+                            className="shrink-0 rounded-md border border-zinc-300 p-1.5 text-zinc-600 hover:text-red-700 disabled:opacity-40"
+                          >
+                            <Trash2 aria-hidden className="size-4" />
+                          </button>
+                        </div>
+                        {validationErrors[size.id] && (
+                          <p className="text-xs text-red-700">{validationErrors[size.id]}</p>
+                        )}
+                        {index === 0 && (
+                          <span className="text-xs text-zinc-500">{t("defaultSize")}</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  onClick={addSize}
+                  className="self-start rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100"
+                >
+                  {t("addSize")}
+                </button>
               </div>
-              {preview && (
+
+              {selectedDims && (
                 <p className="text-sm text-zinc-600">
-                  {formatSize(t, preview.sizeMm, unit)} ·{" "}
-                  {t("sizePx", { w: preview.sizePx[0], h: preview.sizePx[1] })}
+                  {formatSize(t, selectedDims, unit)} ·{" "}
+                  {t("sizePx", { w: preview!.sizePx[0], h: preview!.sizePx[1] })}
                 </p>
               )}
-              {preview?.lowResolution && (
+              {selectedPpi !== undefined && selectedPpi < MIN_PPI && (
                 <p role="status" className="flex gap-2 text-sm text-amber-700">
                   <TriangleAlert aria-hidden className="size-4 shrink-0" />
-                  {t("lowResolution", { ppi: Math.round(preview.ppi) })}
+                  {t("lowResolution", { ppi: Math.round(selectedPpi) })}
                 </p>
               )}
 
@@ -781,7 +981,7 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
             {!saved && preview && preview.contours.length > 1 && (
               <button
                 type="button"
-                disabled={!options || !!error || saving}
+                disabled={!preview || hasErrors || saving}
                 onClick={() => accept(true)}
                 className="rounded-md border border-zinc-300 px-4 py-2 text-sm disabled:opacity-40"
               >
@@ -790,7 +990,7 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
             )}
             <button
               type="button"
-              disabled={!options || !preview || !!error || saving}
+              disabled={!preview || hasErrors || saving}
               onClick={() => accept(false)}
               className="rounded-md bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-40"
             >
