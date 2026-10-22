@@ -500,17 +500,17 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     if (isPanning) return "cursor-grabbing";
     if (spacePressed) return "cursor-grab";
     if (!tool) return "cursor-grab";
-    return "cursor-none";
+    return "";
   }, [isPanning, spacePressed, tool]);
 
   const renderCursor = (cx: number, cy: number) => (
     <g>
       <circle cx={cx} cy={cy} r={brushSize / 2} stroke="white" strokeWidth={2} fill="none" />
       <circle cx={cx} cy={cy} r={brushSize / 2} stroke="black" strokeWidth={1} fill="none" />
-      <line x1={cx - 2} y1={cy} x2={cx + 2} y2={cy} stroke="white" strokeWidth={2} />
-      <line x1={cx} y1={cy - 2} x2={cx} y2={cy + 2} stroke="white" strokeWidth={2} />
-      <line x1={cx - 2} y1={cy} x2={cx + 2} y2={cy} stroke="black" strokeWidth={1} />
-      <line x1={cx} y1={cy - 2} x2={cx} y2={cy + 2} stroke="black" strokeWidth={1} />
+      <line x1={cx - 1} y1={cy} x2={cx + 1} y2={cy} stroke="white" strokeWidth={2} />
+      <line x1={cx} y1={cy - 1} x2={cx} y2={cy + 1} stroke="white" strokeWidth={2} />
+      <line x1={cx - 1} y1={cy} x2={cx + 1} y2={cy} stroke="black" strokeWidth={1} />
+      <line x1={cx} y1={cy - 1} x2={cx} y2={cy + 1} stroke="black" strokeWidth={1} />
     </g>
   );
 
@@ -553,6 +553,18 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     </ToggleGroup.Item>
   );
 
+  const iconButton = (label: string, onClick: () => void, icon: ReactNode, disabled?: boolean) => (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      aria-label={label}
+      className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-40"
+    >
+      {icon}
+    </button>
+  );
+
   const sizeInput = (inputSide: Side, index: 0 | 1) => (
     <label className="flex flex-col gap-1 text-sm">
       {t(inputSide, { unit })}
@@ -573,7 +585,7 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     </label>
   );
 
-  const cursorOverlayVisible = tool && !isPanning && (cursorVisible || isSizing);
+  const cursorOverlayVisible = !isPanning && ((cursorVisible && !!tool) || isSizing);
   const centerX = (containerRef.current?.clientWidth ?? 0) / 2 - PADDING;
   const centerY = (containerRef.current?.clientHeight ?? 0) / 2 - PADDING;
 
@@ -603,7 +615,7 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
                       width: fittedSize.width * zoom,
                       height: fittedSize.height * zoom,
                     }}
-                    className="relative"
+                    className={`relative ${tool && !isPanning && !spacePressed ? "cursor-none" : ""}`}
                   >
                     <svg
                       viewBox={`0 0 ${sourceW} ${sourceH}`}
@@ -682,24 +694,18 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
                   {toolButton("eraser", <Eraser aria-hidden className="size-4" />)}
                 </ToggleGroup.Root>
                 <div className="flex gap-2">
-                  <button
-                    type="button"
-                    disabled={!historyRef.current.canUndo()}
-                    onClick={doUndo}
-                    aria-label={t("undo")}
-                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-40"
-                  >
-                    <Undo2 aria-hidden className="size-4" />
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!historyRef.current.canRedo()}
-                    onClick={doRedo}
-                    aria-label={t("redo")}
-                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-40"
-                  >
-                    <Redo2 aria-hidden className="size-4" />
-                  </button>
+                  {iconButton(
+                    t("undo"),
+                    doUndo,
+                    <Undo2 aria-hidden className="size-4" />,
+                    !historyRef.current.canUndo(),
+                  )}
+                  {iconButton(
+                    t("redo"),
+                    doRedo,
+                    <Redo2 aria-hidden className="size-4" />,
+                    !historyRef.current.canRedo(),
+                  )}
                 </div>
                 <span>
                   {t("brushSize")}: {brushSize}
@@ -719,30 +725,9 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
               <div className="flex flex-col gap-2 text-sm">
                 <span>{Math.round(zoom * 100)}%</span>
                 <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={zoomOut}
-                    aria-label={t("zoomOut")}
-                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-40"
-                  >
-                    <ZoomOut aria-hidden className="size-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={fit}
-                    aria-label={t("fit")}
-                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-40"
-                  >
-                    <Maximize aria-hidden className="size-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={zoomIn}
-                    aria-label={t("zoomIn")}
-                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-40"
-                  >
-                    <ZoomIn aria-hidden className="size-4" />
-                  </button>
+                  {iconButton(t("zoomOut"), zoomOut, <ZoomOut aria-hidden className="size-4" />)}
+                  {iconButton(t("fit"), fit, <Maximize aria-hidden className="size-4" />)}
+                  {iconButton(t("zoomIn"), zoomIn, <ZoomIn aria-hidden className="size-4" />)}
                 </div>
               </div>
 
