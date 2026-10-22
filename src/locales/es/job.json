@@ -29,6 +29,8 @@
   "dropHere": "Arrastra aquí piezas de la Biblioteca de abajo.",
   "libraryHint": "Biblioteca: arrastra una pieza a la lista de arriba o haz clic para añadir una más.",
   "addPiece": "Añadir pieza {{size}}",
+  "size": "Tamaño",
+  "addAnotherSize": "Añadir otro tamaño",
   "quantity": "Cantidad",
   "fill": "Rellenar",
   "fillHint": "Tantas como quepan en la plata que dejen las cantidades fijas",

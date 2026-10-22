@@ -11,7 +11,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import PieceEditor from "./PieceEditor";
-import { deletePiece, listLibrary, openPiece, type PieceView } from "./library";
+import { deletePiece, listLibrary, openPiece, type PieceView, sizeDimensions } from "./library";
 import { formatSize, usePreferences } from "./preferences";
 
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/svg+xml"];
@@ -57,6 +57,16 @@ export default function LibraryView({ pieces, setPieces }: Props) {
     e.preventDefault();
     void open(e.dataTransfer.files[0]);
   };
+
+  const label = (piece: PieceView, sizeId: string) => {
+    const size = piece.sizes.find((s) => s.id === sizeId);
+    if (!size) return "";
+    const dims = sizeDimensions(piece, sizeId);
+    return `${size.name} · ${dims ? formatSize(t, dims, unit) : ""}`;
+  };
+
+  const defaultLabel = (piece: PieceView) => label(piece, piece.sizes[0]?.id ?? "");
+  const allSizesLabel = (piece: PieceView) => piece.sizes.map((s) => label(piece, s.id)).join("\n");
 
   return (
     <section
@@ -128,9 +138,13 @@ export default function LibraryView({ pieces, setPieces }: Props) {
               >
                 <Trash2 aria-hidden className="size-4" />
               </button>
-              <span className="text-center text-sm text-zinc-600">
-                {formatSize(t, piece.sizeMm, unit)}
-              </span>
+              <span className="text-center text-sm text-zinc-600">{defaultLabel(piece)}</span>
+              {piece.sizes.length > 1 && (
+                <span
+                  className="text-center text-xs text-zinc-500"
+                  title={allSizesLabel(piece)}
+                >{`+${piece.sizes.length - 1} ${t("sizes").toLowerCase()}`}</span>
+              )}
             </li>
           ))}
         </ul>

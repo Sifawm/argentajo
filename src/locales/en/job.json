@@ -29,6 +29,8 @@
   "dropHere": "Drag pieces here from the Library below.",
   "libraryHint": "Library: drag a piece into the list above, or click it to add one more.",
   "addPiece": "Add piece {{size}}",
+  "size": "Size",
+  "addAnotherSize": "Add another size",
   "quantity": "Quantity",
   "fill": "Fill",
   "fillHint": "As many as fit in the silver left after the fixed quantities",
