@@ -185,7 +185,10 @@ const SortableSizeItem = ({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={onMakeDefault}
+            onClick={(e) => {
+              e.stopPropagation();
+              onMakeDefault();
+            }}
             disabled={isDefault}
             aria-label={isDefault ? t("defaultSize") : t("makeDefault")}
             title={isDefault ? t("defaultSize") : t("makeDefault")}
@@ -363,6 +366,19 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     [tolerance, sizes, unit, allowRotation, allowMirror],
   );
 
+  // The preview follows the selected Size, not the Default size: reorder so the selected one is
+  // first, because `core` prepares the Piece at the first Size.
+  const previewOptions = useMemo<PrepareOptions>(() => {
+    if (!selectedSizeId) return options;
+    const selectedIndex = sizes.findIndex((s) => s.id === selectedSizeId);
+    if (selectedIndex <= 0) return options;
+    const reordered = arrayMove(sizes, selectedIndex, 0);
+    return {
+      ...options,
+      sizes: reordered.map((s) => ({ id: s.id, name: s.name.trim(), measure: toMeasure(s, unit) })),
+    };
+  }, [options, sizes, selectedSizeId, unit]);
+
   // Decoded by `core` (SVGs rasterised), so the overlay and the edits share its pixel grid.
   const [sourceW, sourceH] = preview?.sourcePx ?? [];
 
@@ -418,7 +434,7 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
   useEffect(() => {
     let stale = false;
     const timer = setTimeout(() => {
-      previewPiece(image, options, edits).then(
+      previewPiece(image, previewOptions, edits).then(
         (piece) => {
           if (stale) return;
           setPreview(piece);
@@ -433,7 +449,7 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
       stale = true;
       clearTimeout(timer);
     };
-  }, [image, options, edits]);
+  }, [image, previewOptions, edits]);
 
   const exportEdits = () =>
     new Promise<Edits | undefined>((resolve) => {
@@ -851,18 +867,9 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     setSelectedSizeId(size.id);
   };
 
-  const selectedSize = sizes.find((s) => s.id === selectedSizeId);
-  const selectedDims = useMemo<[number, number] | undefined>(() => {
-    if (!preview) return undefined;
-    const [w, h] = preview.sizeMm;
-    const measure = selectedSize ? toMeasure(selectedSize, unit) : undefined;
-    if (!measure) return [w, h];
-    const scale = "width" in measure ? measure.width / w : measure.height / h;
-    return [w * scale, h * scale];
-  }, [preview, selectedSize, unit]);
-
-  const selectedPpi =
-    preview && selectedDims ? preview.ppi / (selectedDims[0] / preview.sizeMm[0]) : undefined;
+  // `preview` is prepared for the selected Size, so its dimensions and ppi are already correct.
+  const selectedDims = preview?.sizeMm;
+  const selectedPpi = preview?.ppi;
 
   const cursorOverlayVisible = !isPanning && cursorVisible && !!tool;
   const hasErrors = Object.keys(validationErrors).length > 0;
