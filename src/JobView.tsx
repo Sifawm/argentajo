@@ -480,15 +480,15 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
               return (
                 <li
                   key={`${item.id}:${item.size}`}
-                  className="flex flex-col gap-2 rounded-md border border-zinc-200 p-2"
+                  className="flex items-start gap-3 rounded-md border border-zinc-200 p-2"
                 >
-                  <div className="flex items-center gap-3">
-                    {thumbnail(piece)}
+                  {thumbnail(piece)}
+                  <div className="flex min-w-0 flex-1 flex-col gap-2">
                     <select
                       value={item.size}
                       disabled={item.fixed}
                       onChange={(e) => changeSize(item, e.target.value)}
-                      className="min-w-0 flex-1 rounded-md border border-zinc-300 px-2 py-1 text-xs disabled:opacity-60"
+                      className="min-w-0 rounded-md border border-zinc-300 px-2 py-1 text-xs disabled:opacity-60"
                     >
                       {piece.sizes.map((size) => (
                         <option key={size.id} value={size.id}>
@@ -496,38 +496,42 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
                         </option>
                       ))}
                     </select>
-                    <input
-                      type="number"
-                      min="1"
-                      step="1"
-                      aria-label={t("quantity")}
-                      disabled={item.fill}
-                      value={Number.isNaN(item.quantity) ? "" : item.quantity}
-                      onChange={(e) => {
-                        const quantity = e.target.valueAsNumber;
-                        setItems((items) =>
-                          items.map((i) =>
-                            i.id === item.id && i.size === item.size ? { ...i, quantity } : i,
-                          ),
-                        );
-                      }}
-                      className="w-16 rounded-md border border-zinc-300 px-2 py-1 text-sm disabled:opacity-40"
-                    />
-                    <label className="flex items-center gap-1 text-xs" title={t("fillHint")}>
+                    <div className="flex items-center gap-3">
                       <input
-                        type="checkbox"
-                        checked={item.fill}
+                        type="number"
+                        min="1"
+                        step="1"
+                        aria-label={t("quantity")}
+                        disabled={item.fill}
+                        value={Number.isNaN(item.quantity) ? "" : item.quantity}
                         onChange={(e) => {
-                          const fill = e.target.checked;
+                          const quantity = e.target.valueAsNumber;
                           setItems((items) =>
                             items.map((i) =>
-                              i.id === item.id && i.size === item.size ? { ...i, fill } : i,
+                              i.id === item.id && i.size === item.size ? { ...i, quantity } : i,
                             ),
                           );
                         }}
+                        className="w-20 rounded-md border border-zinc-300 px-2 py-1 text-sm disabled:opacity-40"
                       />
-                      {t("fill")}
-                    </label>
+                      <label className="flex items-center gap-1 text-xs" title={t("fillHint")}>
+                        <input
+                          type="checkbox"
+                          checked={item.fill}
+                          onChange={(e) => {
+                            const fill = e.target.checked;
+                            setItems((items) =>
+                              items.map((i) =>
+                                i.id === item.id && i.size === item.size ? { ...i, fill } : i,
+                              ),
+                            );
+                          }}
+                        />
+                        {t("fill")}
+                      </label>
+                    </div>
+                  </div>
+                  <div className="flex flex-col items-center gap-1">
                     <button
                       type="button"
                       aria-label={t("remove")}
@@ -541,18 +545,20 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
                     >
                       <X aria-hidden className="size-4" />
                     </button>
+                    <button
+                      type="button"
+                      disabled={item.fixed || !addAnotherSize(items, piece)}
+                      onClick={() => {
+                        const next = addAnotherSize(items, piece);
+                        if (next) setItems(next);
+                      }}
+                      aria-label={t("addAnotherSize")}
+                      title={t("addAnotherSize")}
+                      className="rounded-md p-1 text-zinc-500 hover:text-zinc-900 disabled:opacity-40"
+                    >
+                      <Plus aria-hidden className="size-4" />
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    disabled={item.fixed || !addAnotherSize(items, piece)}
-                    onClick={() => {
-                      const next = addAnotherSize(items, piece);
-                      if (next) setItems(next);
-                    }}
-                    className="self-start rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-100 disabled:opacity-40"
-                  >
-                    {t("addAnotherSize")}
-                  </button>
                 </li>
               );
             })}
