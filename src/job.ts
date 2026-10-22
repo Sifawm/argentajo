@@ -1,5 +1,8 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
+/** Width × height in mm. */
+export type Size = [number, number];
+
 /** Paper presets, portrait, in mm. */
 export const PAPERS = {
   a3: [297, 420],
@@ -12,7 +15,8 @@ export const PAPERS = {
 export interface JobRequest {
   /** Oriented as printed. */
   paper: { sizeMm: [number, number]; marginMm: number };
-  sheetMm: [number, number];
+  /** The silver Sheets as each lies on the paper, in the order they're filled. */
+  sheetsMm: Size[];
   separationMm: number;
   edgeMarginMm: number;
   /** Bound on the nesting run, in seconds. */
@@ -21,14 +25,14 @@ export interface JobRequest {
   items: { id: string; quantity: { fixed: number } | "fill" }[];
 }
 
-/** Mirrors `core::nest::Layout`, with its page rendered by `core` as an SVG in mm. */
+/** Mirrors `core::nest::Layout`, with each of its pages rendered by `core` as an SVG in mm. */
 export interface NestView {
-  svg: string;
+  pages: string[];
   /** Copies placed, per Job item. */
   placed: number[];
   /** Copies that didn't fit, per Job item. */
   missing: number[];
-  /** Area of the placed Parts over the Sheet's area, 0–1. */
+  /** Area of the placed Parts over the Sheets' area, 0–1. */
   utilisation: number;
 }
 
@@ -50,3 +54,8 @@ export const nestJob = (
 
 /** Ends the run in progress: `nestJob` then resolves with the best Layout so far. */
 export const stopNesting = () => invoke("stop_nesting");
+
+/** "My sheets": Sheet sizes saved for reuse, width × height in mm. */
+export const loadMySheets = () => invoke<Size[]>("load_my_sheets");
+
+export const saveMySheets = (sheets: Size[]) => invoke("save_my_sheets", { sheets });

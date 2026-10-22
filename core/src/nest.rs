@@ -1,4 +1,4 @@
-//! Nesting: a Job's pieces → a Layout on its Sheet, and a Layout → the printed page as an SVG.
+//! Nesting: a Job's pieces → a Layout on its Sheets, and a Layout → each printed page as an SVG.
 
 use crate::piece::Piece;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -45,8 +45,8 @@ pub struct Paper {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Job {
     pub paper: Paper,
-    /// The silver Sheet, width × height in mm, as it lies on the paper.
-    pub sheet_mm: [f64; 2],
+    /// The silver Sheets, width × height in mm as each lies on the paper, in the order they're filled.
+    pub sheets_mm: Vec<[f64; 2]>,
     /// Minimum distance between pieces, for the saw.
     pub separation_mm: f64,
     /// Minimum distance between a piece and the Sheet's edge.
@@ -85,16 +85,36 @@ impl Quantity {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Layout {
-    /// Top-left corner of the Sheet on the page, in mm.
-    pub sheet_origin_mm: [f64; 2],
-    /// One per placed Part.
-    pub placements: Vec<Placement>,
-    /// Copies placed, per Job item. A copy is placed only with all its Parts.
+    /// One per Job Sheet.
+    pub sheets: Vec<SheetLayout>,
+    /// Copies placed, per Job item. A copy is placed only with all its Parts, on one Sheet.
     pub placed: Vec<u32>,
-    /// Copies that didn't fit, per Job item.
+    /// Copies that didn't fit on any Sheet, per Job item.
     pub missing: Vec<u32>,
-    /// Area of the placed Parts over the Sheet's area.
+    /// Area of the placed Parts over the Sheets' area.
     pub utilisation: f64,
+}
+
+impl Layout {
+    /// How many pages the Sheets take.
+    pub fn pages(&self) -> usize {
+        self.sheets
+            .iter()
+            .map(|sheet| sheet.page + 1)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetLayout {
+    /// Index of the page it's on.
+    pub page: usize,
+    /// Top-left corner of the Sheet on its page, in mm.
+    pub origin_mm: [f64; 2],
+    /// One per Part placed on it.
+    pub placements: Vec<Placement>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -109,9 +129,9 @@ pub struct Placement {
 
 #[derive(Debug)]
 pub enum NestError {
-    /// A size isn't positive, or a separation or margin is negative.
+    /// There is no Sheet, a size isn't positive, or a separation or margin is negative.
     InvalidSettings,
-    /// The Sheet doesn't fit on the paper inside the printer margin.
+    /// A Sheet doesn't fit on the paper inside the printer margin.
     SheetOffPaper,
     /// The nesting engine failed.
     Engine(String),
@@ -122,7 +142,7 @@ impl std::fmt::Display for NestError {
         match self {
             Self::InvalidSettings => write!(
                 f,
-                "sizes must be positive, and the separation and margins not negative"
+                "there must be a sheet, sizes must be positive, and the separation and margins not negative"
             ),
             Self::SheetOffPaper => write!(
                 f,
@@ -135,14 +155,17 @@ impl std::fmt::Display for NestError {
 
 impl std::error::Error for NestError {}
 
-/// Strip-packs the fixed quantities along the Sheet's long side with sparrow, compacted towards
-/// its start. Copies past the Sheet's end, or that don't fit it at all, are missing. Copies of
-/// Fill items then go into the silver left over, as many as fit.
+/// Between Sheets on the page, so the paper can be cut apart per Sheet.
+const SHEET_GAP_MM: f64 = 5.0;
+
+/// Nests the Sheets in order, each taking what it can of the fixed quantities the ones before it
+/// left; copies no Sheet takes are missing. Fill items go into every Sheet's leftover silver. The
+/// Sheets go on the paper in rows from the top left, a new page when one doesn't fit.
 ///
-/// Runs until the Job's time limit or `cancel`, though always until a first Layout, and returns the
-/// best Layout found: the most silver used by fixed quantities, then the most used in all, then the
-/// shortest stretch of Sheet the fixed quantities take. `on_progress` gets each Layout better than the last, so the last one it gets is the
-/// one returned. `iterations` counts the attempts behind them: sparrow's and each fill.
+/// Runs until the Job's time limit or `cancel`, though always until a first Layout of every Sheet,
+/// and returns the best Layout found. `on_progress` gets each Layout better than the last, so the
+/// last one it gets is the one returned. `iterations` counts the attempts behind them: sparrow's and
+/// each fill.
 pub fn nest(
     job: &Job,
     seed: u64,
@@ -151,19 +174,130 @@ pub fn nest(
     iterations: &AtomicU64,
 ) -> Result<Layout, NestError> {
     let deadline = Instant::now() + job.time_limit;
-    let Paper {
-        size_mm: [paper_w, paper_h],
-        margin_mm,
-    } = job.paper;
-    let [w, h] = job.sheet_mm;
-    let (separation, margin) = (job.separation_mm, job.edge_margin_mm);
+    let sheets = &job.sheets_mm;
     // Written so NaN fails too.
-    if !(w > 0.0 && h > 0.0 && margin_mm >= 0.0 && separation >= 0.0 && margin >= 0.0) {
+    let valid = !sheets.is_empty()
+        && sheets.iter().all(|&[w, h]| w > 0.0 && h > 0.0)
+        && job.paper.margin_mm >= 0.0
+        && job.separation_mm >= 0.0
+        && job.edge_margin_mm >= 0.0;
+    if !valid {
         return Err(NestError::InvalidSettings);
     }
-    if w + 2.0 * margin_mm > paper_w || h + 2.0 * margin_mm > paper_h {
-        return Err(NestError::SheetOffPaper);
+    let mut layout = Layout {
+        sheets: place_sheets(job.paper, sheets)?,
+        placed: vec![0; job.items.len()],
+        missing: job.items.iter().map(|item| item.quantity.fixed()).collect(),
+        utilisation: 0.0,
+    };
+    let silver: f64 = sheets.iter().map(|[w, h]| w * h).sum();
+    let mut area = 0.0;
+    // Still to place.
+    let mut quantities: Vec<Quantity> = job.items.iter().map(|item| item.quantity).collect();
+    // ponytail: each Sheet keeps its best before the next starts, with an equal share of the time
+    // left; nest them together if one Sheet's choice ever starves the next.
+    for (s, &sheet) in sheets.iter().enumerate() {
+        let now = Instant::now();
+        let sheet_deadline =
+            now + deadline.saturating_duration_since(now) / (sheets.len() - s) as u32;
+        let with = |nested: &Nested| {
+            let mut next = layout.clone();
+            next.sheets[s].placements = nested.placements.clone();
+            for (i, &placed) in nested.placed.iter().enumerate() {
+                next.placed[i] += placed;
+                next.missing[i] = next.missing[i].saturating_sub(placed);
+            }
+            next.utilisation = (area + nested.area) / silver;
+            next
+        };
+        let nested = nest_sheet(
+            job,
+            sheet,
+            &quantities,
+            seed,
+            sheet_deadline,
+            cancel,
+            iterations,
+            // An empty later Sheet changes nothing.
+            |nested| {
+                if s == 0 || !nested.placements.is_empty() {
+                    on_progress(&with(nested))
+                }
+            },
+        )?;
+        layout = with(&nested);
+        area += nested.area;
+        for (quantity, &placed) in quantities.iter_mut().zip(&nested.placed) {
+            if let Quantity::Fixed(n) = quantity {
+                *n -= placed;
+            }
+        }
     }
+    Ok(layout)
+}
+
+/// The Sheets on the pages, still empty: in rows from the top left inside the printer margin,
+/// `SHEET_GAP_MM` apart, starting a new row when one is too wide for this one and a new page when
+/// it is too tall for this one.
+fn place_sheets(paper: Paper, sheets: &[[f64; 2]]) -> Result<Vec<SheetLayout>, NestError> {
+    let Paper {
+        size_mm: [paper_w, paper_h],
+        margin_mm: m,
+    } = paper;
+    let (mut page, mut x, mut y, mut row_h) = (0, m, m, 0.0f64);
+    sheets
+        .iter()
+        .map(|&[w, h]| {
+            if w + 2.0 * m > paper_w || h + 2.0 * m > paper_h {
+                return Err(NestError::SheetOffPaper);
+            }
+            if x + w > paper_w - m {
+                (x, y, row_h) = (m, y + row_h + SHEET_GAP_MM, 0.0);
+            }
+            if y + h > paper_h - m {
+                (page, x, y, row_h) = (page + 1, m, m, 0.0);
+            }
+            let sheet = SheetLayout {
+                page,
+                origin_mm: [x, y],
+                placements: vec![],
+            };
+            x += w + SHEET_GAP_MM;
+            row_h = row_h.max(h);
+            Ok(sheet)
+        })
+        .collect()
+}
+
+/// What one Sheet holds.
+struct Nested {
+    placements: Vec<Placement>,
+    /// Copies placed, per Job item.
+    placed: Vec<u32>,
+    /// Of the placed Parts, in mm².
+    area: f64,
+}
+
+/// Strip-packs `quantities`' fixed copies along the Sheet's long side with sparrow, compacted
+/// towards its start. Copies past the Sheet's end, or that don't fit it at all, are left out.
+/// Copies of Fill items then go into the silver left over, as many as fit.
+///
+/// Runs until `deadline` or `cancel`, though always until a first result, and returns the best
+/// found: the most silver used by fixed quantities, then the most used in all, then the shortest
+/// stretch of Sheet the fixed quantities take. `on_progress` gets each result better than the
+/// last, so the last one it gets is the one returned.
+#[allow(clippy::too_many_arguments)]
+fn nest_sheet(
+    job: &Job,
+    [w, h]: [f64; 2],
+    quantities: &[Quantity],
+    seed: u64,
+    deadline: Instant,
+    cancel: &AtomicBool,
+    iterations: &AtomicU64,
+    mut on_progress: impl FnMut(&Nested),
+) -> Result<Nested, NestError> {
+    let (separation, margin) = (job.separation_mm, job.edge_margin_mm);
 
     // The strip runs along the Sheet's long side. A portrait Sheet is the strip turned a quarter;
     // items go in turned back a quarter, so they keep the orientation sparrow gives them.
@@ -190,10 +324,10 @@ pub fn nest(
         .items
         .iter()
         .enumerate()
-        .filter(|(_, item)| item.quantity != Quantity::Fixed(0))
+        .filter(|&(i, _)| quantities[i] != Quantity::Fixed(0))
         .flat_map(|(i, item)| (0..item.piece.contours.len()).map(move |part| (i, part)))
         .collect();
-    // Pieces with a Part too wide for the Sheet whichever way it may turn: all their copies are missing.
+    // Pieces with a Part too wide for the Sheet whichever way it may turn: none of their copies go on it.
     let across = short - 2.0 * margin;
     let mut unplaceable: Vec<bool> = job
         .items
@@ -268,7 +402,7 @@ pub fn nest(
                 fitting[placed.item_id as usize].push((reach, placed));
             }
         }
-        let mut placed: Vec<u32> = job.items.iter().map(|item| item.quantity.fixed()).collect();
+        let mut placed: Vec<u32> = quantities.iter().map(|q| q.fixed()).collect();
         for (&(i, _), fits) in parts.iter().zip(&mut fitting) {
             placed[i] = placed[i].min(fits.len() as u32);
             fits.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -292,7 +426,7 @@ pub fn nest(
     // The Fill items' Parts with the fixed ones, on the whole usable Sheet, for `fill`; and per
     // Fill item, its Parts' indices there.
     let fillable: Vec<usize> = (0..job.items.len())
-        .filter(|&i| job.items[i].quantity == Quantity::Fill && !unplaceable[i])
+        .filter(|&i| quantities[i] == Quantity::Fill && !unplaceable[i])
         .collect();
     let filler = if fillable.is_empty() {
         None
@@ -301,7 +435,7 @@ pub fn nest(
             .filter(|&id| !unplaceable[parts[id].0])
             .map(|id| {
                 let (i, part) = parts[id];
-                let demand = match job.items[i].quantity {
+                let demand = match quantities[i] {
                     Quantity::Fixed(n) => n as u64,
                     // More copies than could ever fit.
                     // ponytail: capped at 10,001 copies against a degenerate zero-area Part; lift
@@ -405,7 +539,7 @@ pub fn nest(
         )
     };
 
-    let layout_of = |solution: &Solution| {
+    let nested_of = |solution: &Solution| {
         let mut counts = vec![0u32; parts.len()];
         let mut area = 0.0;
         let placements = solution
@@ -437,29 +571,24 @@ pub fn nest(
                     .unwrap_or(0)
             })
             .collect();
-        Layout {
-            sheet_origin_mm: [margin_mm, margin_mm],
+        Nested {
             placements,
-            missing: job
-                .items
-                .iter()
-                .zip(&placed)
-                .map(|(item, placed)| item.quantity.fixed().saturating_sub(*placed))
-                .collect(),
             placed,
-            utilisation: area / (w * h),
+            area,
         }
     };
+    // Of this Sheet.
+    let share = |nested: &Nested| nested.area / (w * h);
 
     // With the fixed quantities' share of the silver and length of Sheet.
-    let mut best: Option<(Layout, f64, f64)> = None;
+    let mut best: Option<(Nested, f64, f64)> = None;
     loop {
         let items: Vec<ExtItem> = (0..parts.len())
             .filter(|&id| {
                 let i = parts[id].0;
-                !unplaceable[i] && job.items[i].quantity.fixed() > 0
+                !unplaceable[i] && quantities[i].fixed() > 0
             })
-            .map(|id| ext_item(id, job.items[parts[id].0].quantity.fixed() as u64))
+            .map(|id| ext_item(id, quantities[parts[id].0].fixed() as u64))
             .collect();
         if items.is_empty() {
             break;
@@ -468,7 +597,7 @@ pub fn nest(
         let same = |a: f64, b: f64| (a - b).abs() < 1e-9;
         let on_solution = |solution| {
             let (kept, length) = keep(&unplaceable, solution);
-            let fixed = layout_of(&kept).utilisation;
+            let fixed = share(&nested_of(&kept));
             if best
                 .as_ref()
                 .is_some_and(|(_, best_fixed, _)| fixed < *best_fixed && !same(fixed, *best_fixed))
@@ -482,19 +611,19 @@ pub fn nest(
                 return;
             }
             // A shorter stretch of fixed quantities can leave fill less room: compare once filled.
-            let layout = layout_of(&filled);
+            let nested = nested_of(&filled);
             let better = best.as_ref().is_none_or(|(best, best_fixed, best_length)| {
                 if !same(fixed, *best_fixed) {
                     fixed > *best_fixed
-                } else if !same(layout.utilisation, best.utilisation) {
-                    layout.utilisation > best.utilisation
+                } else if !same(share(&nested), share(best)) {
+                    share(&nested) > share(best)
                 } else {
                     length < *best_length
                 }
             });
             if better {
-                on_progress(&layout);
-                best = Some((layout, fixed, length));
+                on_progress(&nested);
+                best = Some((nested, fixed, length));
             }
         };
         match strip_pack(
@@ -517,11 +646,11 @@ pub fn nest(
         }
     }
     Ok(match best {
-        Some((layout, ..)) => layout,
+        Some((nested, ..)) => nested,
         // No fixed quantities to place: only fill, retried with the next seeds until the run ends.
         // ponytail: random restarts of the greedy fill; search around the best one if they plateau.
         None => {
-            let mut best = layout_of(&fill(vec![], true, seed).0);
+            let mut best = nested_of(&fill(vec![], true, seed).0);
             on_progress(&best);
             if filler.is_some() {
                 for seed in (1..).map(|k| seed.wrapping_add(k)) {
@@ -529,10 +658,10 @@ pub fn nest(
                     if !whole {
                         break;
                     }
-                    let layout = layout_of(&filled);
-                    if layout.utilisation > best.utilisation + 1e-9 {
-                        on_progress(&layout);
-                        best = layout;
+                    let nested = nested_of(&filled);
+                    if share(&nested) > share(&best) + 1e-9 {
+                        on_progress(&nested);
+                        best = nested;
                     }
                 }
             }
@@ -687,11 +816,9 @@ impl Terminator for Stopper {
     }
 }
 
-/// The page as an SVG in mm: the Sheet's outline and each placed Part's image, as nested.
-pub fn render_page(job: &Job, layout: &Layout) -> String {
+/// Page `page` as an SVG in mm: its Sheets' outlines and each Part placed on them, as nested.
+pub fn render_page(job: &Job, layout: &Layout, page: usize) -> String {
     let [page_w, page_h] = job.paper.size_mm;
-    let [sheet_w, sheet_h] = job.sheet_mm;
-    let [x, y] = layout.sheet_origin_mm;
     let mut svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{page_w}mm" height="{page_h}mm" viewBox="0 0 {page_w} {page_h}"><defs>"#
     );
@@ -716,23 +843,34 @@ pub fn render_page(job: &Job, layout: &Layout) -> String {
     }
     _ = write!(
         svg,
-        r#"</defs><rect width="{page_w}" height="{page_h}" fill="white"/><g transform="translate({x} {y})"><rect width="{sheet_w}" height="{sheet_h}" fill="none" stroke="black" stroke-width="0.2"/>"#
+        r#"</defs><rect width="{page_w}" height="{page_h}" fill="white"/>"#
     );
-    for p in &layout.placements {
-        let [a, b, c, d, e, f] = p.transform;
-        let clip = if job.items[p.item].piece.contours.len() > 1 {
-            format!(r#" clip-path="url(#part{}-{})""#, p.item, p.part)
-        } else {
-            String::new()
-        };
-        // In a group, so the clip path is in the Piece's coordinates too.
+    for (sheet, [sheet_w, sheet_h]) in layout.sheets.iter().zip(&job.sheets_mm) {
+        if sheet.page != page {
+            continue;
+        }
+        let [x, y] = sheet.origin_mm;
         _ = write!(
             svg,
-            r##"<g transform="matrix({a} {b} {c} {d} {e} {f})"><use href="#piece{}"{clip}/></g>"##,
-            p.item
+            r#"<g transform="translate({x} {y})"><rect width="{sheet_w}" height="{sheet_h}" fill="none" stroke="black" stroke-width="0.2"/>"#
         );
+        for p in &sheet.placements {
+            let [a, b, c, d, e, f] = p.transform;
+            let clip = if job.items[p.item].piece.contours.len() > 1 {
+                format!(r#" clip-path="url(#part{}-{})""#, p.item, p.part)
+            } else {
+                String::new()
+            };
+            // In a group, so the clip path is in the Piece's coordinates too.
+            _ = write!(
+                svg,
+                r##"<g transform="matrix({a} {b} {c} {d} {e} {f})"><use href="#piece{}"{clip}/></g>"##,
+                p.item
+            );
+        }
+        svg += "</g>";
     }
-    svg + "</g></svg>"
+    svg + "</svg>"
 }
 
 fn points(polygon: &[[f64; 2]]) -> String {

@@ -1,8 +1,17 @@
-import { CircleStop, Play, RefreshCw, TriangleAlert, X } from "lucide-react";
+import { Bookmark, CircleStop, Play, Plus, RefreshCw, TriangleAlert, X } from "lucide-react";
 import { ToggleGroup } from "radix-ui";
 import { type DragEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { type JobRequest, type NestView, nestJob, PAPERS, stopNesting } from "./job";
+import {
+  type JobRequest,
+  loadMySheets,
+  type NestView,
+  nestJob,
+  PAPERS,
+  saveMySheets,
+  type Size,
+  stopNesting,
+} from "./job";
 import type { PieceView } from "./library";
 
 type PaperName = keyof typeof PAPERS | "custom";
@@ -11,6 +20,8 @@ type Item = { id: string; quantity: number; fill: boolean };
 
 /** What Library thumbnails carry when dragged into the Job. */
 const DRAG_TYPE = "application/x-argentajo-piece";
+
+const NEW_SHEET: Size = [100, 50];
 
 const isPositive = (n: number) => Number.isFinite(n) && n > 0;
 const isSpacing = (n: number) => Number.isFinite(n) && n >= 0;
@@ -21,14 +32,15 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
   const [customPaper, setCustomPaper] = useState<[number, number]>([210, 297]);
   const [landscape, setLandscape] = useState(false);
   const [printerMargin, setPrinterMargin] = useState(5);
-  const [sheet, setSheet] = useState<[number, number]>([100, 50]);
+  const [sheets, setSheets] = useState<Size[]>([NEW_SHEET]);
+  const [mySheets, setMySheets] = useState<Size[]>([]);
   const [separation, setSeparation] = useState(1);
   const [edgeMargin, setEdgeMargin] = useState(1.5);
   const [timeLimit, setTimeLimit] = useState(60);
   const [items, setItems] = useState<Item[]>([]);
   // With the request it was calculated for: `placed` and `missing` follow its items.
   const [result, setResult] = useState<{ view: NestView; job: JobRequest }>();
-  const [svgUrl, setSvgUrl] = useState<string>();
+  const [pageUrls, setPageUrls] = useState<string[]>([]);
   const [calculating, setCalculating] = useState(false);
   // When the run in progress started, in `performance.now()` ms, and its time limit.
   const [started, setStarted] = useState<{ at: number; seconds: number }>();
@@ -49,7 +61,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
       sizeMm: landscape ? [longSide, shortSide] : [shortSide, longSide],
       marginMm: printerMargin,
     },
-    sheetMm: sheet,
+    sheetsMm: sheets,
     separationMm: separation,
     edgeMarginMm: edgeMargin,
     timeLimitS: timeLimit,
@@ -59,7 +71,8 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     })),
   };
   const valid =
-    [...job.paper.sizeMm, ...sheet].every(isPositive) &&
+    sheets.length > 0 &&
+    [...job.paper.sizeMm, ...sheets.flat()].every(isPositive) &&
     [printerMargin, separation, edgeMargin].every(isSpacing) &&
     isPositive(timeLimit) &&
     jobItems.length > 0 &&
@@ -72,10 +85,22 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
 
   useEffect(() => {
     if (!result) return;
-    const url = URL.createObjectURL(new Blob([result.view.svg], { type: "image/svg+xml" }));
-    setSvgUrl(url);
-    return () => URL.revokeObjectURL(url);
+    const urls = result.view.pages.map((svg) =>
+      URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" })),
+    );
+    setPageUrls(urls);
+    return () => urls.forEach((url) => URL.revokeObjectURL(url));
   }, [result]);
+
+  useEffect(() => {
+    loadMySheets().then(setMySheets, (e) => setError(String(e)));
+  }, []);
+
+  const sameSize = (a: Size, b: Size) => a[0] === b[0] && a[1] === b[1];
+  const keepMySheets = (next: Size[]) => {
+    setMySheets(next);
+    saveMySheets(next).catch((e) => setError(t("mySheetsFailed", { error: String(e) })));
+  };
 
   const add = (id: string) =>
     setItems((items) =>
@@ -109,6 +134,13 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
       .finally(() => {
         if (id === run.current) setCalculating(false);
       });
+  };
+
+  /** One more Sheet like the last, nested again at once. */
+  const addIdenticalSheet = () => {
+    const next = [...sheets, sheets.at(-1)!];
+    setSheets(next);
+    if (valid) calculate({ ...job, sheetsMm: next });
   };
 
   /** Takes the piece out of the Job and nests what's left, if anything. */
@@ -224,11 +256,79 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
           {numberInput(t("printerMargin"), printerMargin, setPrinterMargin)}
         </Group>
 
-        <Group title={t("sheet")}>
-          <div className="flex gap-3">
-            {numberInput(t("widthMm"), sheet[0], (w) => setSheet([w, sheet[1]]))}
-            {numberInput(t("heightMm"), sheet[1], (h) => setSheet([sheet[0], h]))}
-          </div>
+        <Group title={t("sheets")}>
+          <ol className="flex flex-col gap-2">
+            {sheets.map((sheet, i) => {
+              const update = (size: Size) =>
+                setSheets((sheets) => sheets.map((s, j) => (j === i ? size : s)));
+              return (
+                <li key={i} className="flex items-end gap-2">
+                  {numberInput(t("widthMm"), sheet[0], (w) => update([w, sheet[1]]))}
+                  {numberInput(t("heightMm"), sheet[1], (h) => update([sheet[0], h]))}
+                  <button
+                    type="button"
+                    aria-label={t("saveSheet")}
+                    title={t("saveSheet")}
+                    disabled={!sheet.every(isPositive) || mySheets.some((s) => sameSize(s, sheet))}
+                    onClick={() => keepMySheets([...mySheets, sheet])}
+                    className="rounded-md p-1 text-zinc-500 hover:text-zinc-900 disabled:opacity-40"
+                  >
+                    <Bookmark aria-hidden className="size-4" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={t("removeSheet")}
+                    title={t("removeSheet")}
+                    onClick={() => setSheets((sheets) => sheets.filter((_, j) => j !== i))}
+                    className="rounded-md p-1 text-zinc-500 hover:text-red-700"
+                  >
+                    <X aria-hidden className="size-4" />
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+          <button
+            type="button"
+            onClick={() => setSheets((sheets) => [...sheets, sheets.at(-1) ?? NEW_SHEET])}
+            className="inline-flex items-center gap-1 self-start rounded-md border border-zinc-300 px-2 py-1 text-sm"
+          >
+            <Plus aria-hidden className="size-4" />
+            {t("addSheet")}
+          </button>
+          {mySheets.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <span className="text-xs text-zinc-500">{t("mySheets")}</span>
+              <ul className="flex flex-wrap gap-2">
+                {mySheets.map((size) => {
+                  const label = t("library:sizeMm", { w: size[0], h: size[1] });
+                  return (
+                    <li
+                      key={size.join("x")}
+                      className="flex items-center rounded-md border border-zinc-300 text-xs"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setSheets((sheets) => [...sheets, size])}
+                        className="py-1 pr-1 pl-2"
+                      >
+                        {label}
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={t("forgetSheet", { size: label })}
+                        title={t("forgetSheet", { size: label })}
+                        onClick={() => keepMySheets(mySheets.filter((s) => !sameSize(s, size)))}
+                        className="p-1 text-zinc-500 hover:text-red-700"
+                      >
+                        <X aria-hidden className="size-3" />
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
           <div className="flex gap-3">
             {numberInput(t("separation"), separation, setSeparation)}
             {numberInput(t("edgeMargin"), edgeMargin, setEdgeMargin)}
@@ -388,13 +488,30 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
                     </li>
                   ))}
                 </ul>
+                {!calculating && !stale && sheets.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={addIdenticalSheet}
+                    className="inline-flex items-center gap-1 self-start rounded-md border border-amber-700 px-2 py-1"
+                  >
+                    <Plus aria-hidden className="size-4" />
+                    {t("addIdenticalSheet")}
+                  </button>
+                )}
               </div>
             )}
-            <img
-              src={svgUrl}
-              alt={t("preview")}
-              className={`min-h-0 w-full flex-1 rounded-md bg-zinc-200 object-contain p-4 ${stale ? "opacity-50" : ""}`}
-            />
+            <div
+              className={`flex min-h-0 flex-1 gap-4 overflow-x-auto rounded-md bg-zinc-200 p-4 ${stale ? "opacity-50" : ""}`}
+            >
+              {pageUrls.map((url, i) => (
+                <img
+                  key={url}
+                  src={url}
+                  alt={t("preview", { page: i + 1 })}
+                  className="h-full max-w-full shrink-0 object-contain"
+                />
+              ))}
+            </div>
           </>
         ) : (
           <p className="m-auto text-zinc-500">{t("noResult")}</p>

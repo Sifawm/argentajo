@@ -256,7 +256,7 @@ fn list_library(app: tauri::AppHandle) -> Result<Vec<PieceView>, String> {
 #[serde(rename_all = "camelCase")]
 struct JobRequest {
     paper: Paper,
-    sheet_mm: [f64; 2],
+    sheets_mm: Vec<[f64; 2]>,
     separation_mm: f64,
     edge_margin_mm: f64,
     time_limit_s: f64,
@@ -269,10 +269,10 @@ struct ItemRequest {
     quantity: Quantity,
 }
 
-/// The Layout with its page rendered.
+/// The Layout with each of its pages rendered.
 #[derive(Serialize)]
 struct NestView {
-    svg: String,
+    pages: Vec<String>,
     #[serde(flatten)]
     layout: Layout,
 }
@@ -280,7 +280,9 @@ struct NestView {
 impl NestView {
     fn new(job: &Job, layout: Layout) -> Self {
         Self {
-            svg: render_page(job, &layout),
+            pages: (0..layout.pages())
+                .map(|page| render_page(job, &layout, page))
+                .collect(),
             layout,
         }
     }
@@ -313,7 +315,7 @@ fn nest_job(
         .collect::<Result<_, String>>()?;
     let job = Job {
         paper: job.paper,
-        sheet_mm: job.sheet_mm,
+        sheets_mm: job.sheets_mm,
         separation_mm: job.separation_mm,
         edge_margin_mm: job.edge_margin_mm,
         time_limit: Duration::try_from_secs_f64(job.time_limit_s).map_err(|e| e.to_string())?,
@@ -348,6 +350,33 @@ fn nest_job(
     Ok(NestView::new(&job, layout))
 }
 
+/// "My sheets": the Sheet sizes saved for reuse, width × height in mm, in a JSON file in app data.
+fn my_sheets_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("my-sheets.json"))
+}
+
+/// None saved yet reads as none.
+#[tauri::command(async)]
+fn load_my_sheets(app: tauri::AppHandle) -> Result<Vec<[f64; 2]>, String> {
+    match fs::read(my_sheets_file(&app)?) {
+        Ok(json) => serde_json::from_slice(&json).map_err(|e| e.to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Replaces the saved sizes.
+#[tauri::command(async)]
+fn save_my_sheets(app: tauri::AppHandle, sheets: Vec<[f64; 2]>) -> Result<(), String> {
+    let file = my_sheets_file(&app)?;
+    fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
+    fs::write(file, serde_json::to_vec_pretty(&sheets).unwrap()).map_err(|e| e.to_string())
+}
+
 /// Ends the latest nesting run, which then returns the best Layout so far.
 #[tauri::command]
 fn stop_nesting(nesting: State<Nesting>) {
@@ -374,7 +403,9 @@ fn main() {
             delete_piece,
             list_library,
             nest_job,
-            stop_nesting
+            stop_nesting,
+            load_my_sheets,
+            save_my_sheets
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

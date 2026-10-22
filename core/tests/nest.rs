@@ -1,9 +1,11 @@
 //! Nesting properties, on synthetic pieces with exact contours. Nesting is stochastic, so these
 //! assert invariants (no overlap, containment, separation, flags, all-or-nothing Parts, the missing
-//! report, utilisation) over fixed seeds rather than coordinates.
+//! report, utilisation, Sheets on the page) over fixed seeds rather than coordinates.
 
 use argentajo_core::nest::Quantity::{Fill, Fixed};
-use argentajo_core::nest::{Job, JobItem, Layout, Paper, Placement, Quantity, nest, render_page};
+use argentajo_core::nest::{
+    Job, JobItem, Layout, NestError, Paper, Placement, Quantity, SheetLayout, nest, render_page,
+};
 use argentajo_core::piece::{Piece, PrepareOptions, RealSize, prepare_piece};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -12,6 +14,9 @@ const SEEDS: [u64; 2] = [1, 2];
 const TIME_LIMIT: Duration = Duration::from_secs(2);
 /// jagua-rs rounds its separation offsets with 0.1 rad chords and works in f32.
 const TOLERANCE: f64 = 0.01;
+
+/// Between Sheets on the page.
+const SHEET_GAP: f64 = 5.0;
 
 const A4: Paper = Paper {
     size_mm: [210.0, 297.0],
@@ -60,7 +65,7 @@ fn piece(contours: Vec<Vec<[f64; 2]>>, allow_rotation: bool, allow_mirror: bool)
 fn job(sheet_mm: [f64; 2], items: Vec<(Piece, Quantity)>) -> Job {
     Job {
         paper: A4,
-        sheet_mm,
+        sheets_mm: vec![sheet_mm],
         separation_mm: 1.0,
         edge_margin_mm: 1.5,
         time_limit: TIME_LIMIT,
@@ -144,42 +149,61 @@ fn distance(a: &[[f64; 2]], b: &[[f64; 2]]) -> f64 {
 
 /// Every invariant a Layout must hold, whatever the seed.
 fn assert_valid(job: &Job, layout: &Layout) {
-    let [w, h] = job.sheet_mm;
-    let m = job.edge_margin_mm - TOLERANCE;
-    let polygons: Vec<_> = layout.placements.iter().map(|p| placed(job, p)).collect();
+    assert_sheets_on_pages(job, layout);
+    let mut area = 0.0;
+    for (s, (sheet, &[w, h])) in layout.sheets.iter().zip(&job.sheets_mm).enumerate() {
+        let m = job.edge_margin_mm - TOLERANCE;
+        let polygons: Vec<_> = sheet.placements.iter().map(|p| placed(job, p)).collect();
 
-    for (p, polygon) in layout.placements.iter().zip(&polygons) {
-        assert!(
-            polygon
-                .iter()
-                .all(|&[x, y]| x >= m && x <= w - m && y >= m && y <= h - m),
-            "{p:?} is not inside the sheet minus the edge margin"
-        );
-        let [a, b, c, d, ..] = p.transform;
-        let piece = &job.items[p.item].piece;
-        if !piece.allow_rotation {
-            // Only a left-right flip, if any, keeps it upright.
+        for (p, polygon) in sheet.placements.iter().zip(&polygons) {
             assert!(
-                b.abs() < 1e-6 && c.abs() < 1e-6 && (d - 1.0).abs() < 1e-6,
-                "{p:?} rotated"
+                polygon
+                    .iter()
+                    .all(|&[x, y]| x >= m && x <= w - m && y >= m && y <= h - m),
+                "sheet {s}: {p:?} is not inside the sheet minus the edge margin"
             );
-            assert!((a.abs() - 1.0).abs() < 1e-6, "{p:?} scaled");
+            let [a, b, c, d, ..] = p.transform;
+            let piece = &job.items[p.item].piece;
+            if !piece.allow_rotation {
+                // Only a left-right flip, if any, keeps it upright.
+                assert!(
+                    b.abs() < 1e-6 && c.abs() < 1e-6 && (d - 1.0).abs() < 1e-6,
+                    "{p:?} rotated"
+                );
+                assert!((a.abs() - 1.0).abs() < 1e-6, "{p:?} scaled");
+            }
+            if !piece.allow_mirror {
+                assert!(a * d - b * c > 0.0, "{p:?} mirrored");
+            }
         }
-        if !piece.allow_mirror {
-            assert!(a * d - b * c > 0.0, "{p:?} mirrored");
-        }
-    }
 
-    for i in 0..polygons.len() {
-        for j in i + 1..polygons.len() {
-            let gap = distance(&polygons[i], &polygons[j]);
-            assert!(
-                gap >= job.separation_mm - TOLERANCE,
-                "{:?} and {:?} are {gap} mm apart",
-                layout.placements[i],
-                layout.placements[j]
-            );
+        for i in 0..polygons.len() {
+            for j in i + 1..polygons.len() {
+                let gap = distance(&polygons[i], &polygons[j]);
+                assert!(
+                    gap >= job.separation_mm - TOLERANCE,
+                    "sheet {s}: {:?} and {:?} are {gap} mm apart",
+                    sheet.placements[i],
+                    sheet.placements[j]
+                );
+            }
         }
+
+        for (i, item) in job.items.iter().enumerate() {
+            let copies = copies_on(sheet, i);
+            for part in 0..item.piece.contours.len() {
+                let n = sheet
+                    .placements
+                    .iter()
+                    .filter(|p| p.item == i && p.part == part)
+                    .count();
+                assert_eq!(
+                    n, copies,
+                    "sheet {s}, item {i}, part {part}: a copy's Parts share its Sheet"
+                );
+            }
+        }
+        area += polygons.iter().map(|p| polygon_area(p)).sum::<f64>();
     }
 
     for (i, item) in job.items.iter().enumerate() {
@@ -191,26 +215,60 @@ fn assert_valid(job: &Job, layout: &Layout) {
             ),
             Fill => assert_eq!(layout.missing[i], 0, "item {i}: fill is never missing"),
         }
-        for part in 0..item.piece.contours.len() {
-            let n = layout
-                .placements
-                .iter()
-                .filter(|p| p.item == i && p.part == part)
-                .count();
-            assert_eq!(
-                n, layout.placed[i] as usize,
-                "item {i}, part {part}: one per placed copy"
+        let copies: usize = layout.sheets.iter().map(|sheet| copies_on(sheet, i)).sum();
+        assert_eq!(
+            copies, layout.placed[i] as usize,
+            "item {i}: one per placed copy"
+        );
+    }
+
+    let silver: f64 = job.sheets_mm.iter().map(|[w, h]| w * h).sum();
+    assert!(
+        (layout.utilisation - area / silver).abs() < 1e-9,
+        "utilisation {} is not placed area / sheets' area {}",
+        layout.utilisation,
+        area / silver
+    );
+}
+
+/// Copies of item `i` on the Sheet, counted by its first Part.
+fn copies_on(sheet: &SheetLayout, i: usize) -> usize {
+    sheet
+        .placements
+        .iter()
+        .filter(|p| p.item == i && p.part == 0)
+        .count()
+}
+
+/// Each Sheet lies on its page inside the printer margin, apart from the others on that page.
+fn assert_sheets_on_pages(job: &Job, layout: &Layout) {
+    let [page_w, page_h] = job.paper.size_mm;
+    let m = job.paper.margin_mm;
+    assert_eq!(layout.sheets.len(), job.sheets_mm.len(), "one per Sheet");
+    let rects: Vec<_> = layout
+        .sheets
+        .iter()
+        .zip(&job.sheets_mm)
+        .map(|(sheet, &[w, h])| {
+            let [x, y] = sheet.origin_mm;
+            (sheet.page, [x, y, x + w, y + h])
+        })
+        .collect();
+    for (s, &(page, [x0, y0, x1, y1])) in rects.iter().enumerate() {
+        assert!(page < layout.pages(), "sheet {s} on page {page}");
+        assert!(
+            x0 >= m - 1e-9 && y0 >= m - 1e-9 && x1 <= page_w - m + 1e-9 && y1 <= page_h - m + 1e-9,
+            "sheet {s} at {:?} is not inside the printer margin",
+            [x0, y0, x1, y1]
+        );
+        for &(other_page, [u0, v0, u1, v1]) in &rects[s + 1..] {
+            let apart = (u0 - x1).max(x0 - u1).max(v0 - y1).max(y0 - v1);
+            assert!(
+                page != other_page || apart >= SHEET_GAP - 1e-9,
+                "sheet {s} is {apart} mm from a later one on page {page}"
             );
         }
     }
-
-    let area: f64 = polygons.iter().map(|p| polygon_area(p)).sum();
-    assert!(
-        (layout.utilisation - area / (w * h)).abs() < 1e-9,
-        "utilisation {} is not placed area / sheet area {}",
-        layout.utilisation,
-        area / (w * h)
-    );
 }
 
 fn nest_valid(job: &Job, seed: u64) -> Layout {
@@ -219,7 +277,7 @@ fn nest_valid(job: &Job, seed: u64) -> Layout {
     layout
 }
 
-fn try_nest(job: &Job, seed: u64) -> Result<Layout, argentajo_core::nest::NestError> {
+fn try_nest(job: &Job, seed: u64) -> Result<Layout, NestError> {
     nest(
         job,
         seed,
@@ -284,7 +342,7 @@ fn compacts_towards_one_end_of_the_sheet() {
             vec![(piece(vec![rect(10.0, 10.0)], false, false), Fixed(3))],
         );
         let layout = nest_valid(&job, 1);
-        let far = layout
+        let far = layout.sheets[0]
             .placements
             .iter()
             .flat_map(|p| placed(&job, p))
@@ -382,9 +440,9 @@ fn renders_the_page_in_mm_with_every_placed_part() {
     .unwrap();
     let job = job([100.0, 60.0], vec![(ring, Fixed(3))]);
     let layout = nest_valid(&job, 1);
-    assert_eq!(layout.placements.len(), 6);
+    assert_eq!(layout.sheets[0].placements.len(), 6);
 
-    let svg = render_page(&job, &layout);
+    let svg = render_page(&job, &layout, 0);
     let tree = resvg::usvg::Tree::from_str(&svg, &Default::default()).unwrap();
     let px_per_mm = 96.0 / 25.4;
     assert!((tree.size().width() - 210.0 * px_per_mm).abs() < 0.01);
@@ -437,7 +495,7 @@ fn reports_every_improved_layout_and_returns_the_best() {
 fn cancelling_mid_run_returns_a_valid_layout() {
     let job = crowded_job(Duration::from_secs(60));
     let cancel = AtomicBool::new(false);
-    let start = Instant::now();
+    let mut cancelled = None;
     let mut reported = vec![];
     let layout = nest(
         &job,
@@ -445,15 +503,17 @@ fn cancelling_mid_run_returns_a_valid_layout() {
         |l| {
             reported.push(l.clone());
             cancel.store(true, Ordering::Relaxed);
+            _ = cancelled.get_or_insert_with(Instant::now);
         },
         &cancel,
         &AtomicU64::new(0),
     )
     .unwrap();
+    // The first Layout is always waited for: timed from the cancel, not the start.
+    let after = cancelled.unwrap().elapsed();
     assert!(
-        start.elapsed() < Duration::from_secs(5),
-        "took {:?}",
-        start.elapsed()
+        after < Duration::from_secs(1),
+        "took {after:?} after the cancel"
     );
     assert_valid(&job, &layout);
     assert_eq!(reported.last(), Some(&layout), "the best so far is kept");
@@ -579,4 +639,116 @@ fn fill_that_does_not_fit_is_not_missing() {
     );
     let layout = nest_valid(&job, 1);
     assert_eq!((layout.placed[0], layout.missing[0]), (0, 0));
+}
+
+fn square(size: f64, quantity: Quantity) -> (Piece, Quantity) {
+    (piece(vec![rect(size, size)], false, false), quantity)
+}
+
+#[test]
+fn sheets_go_in_rows_inside_the_margin_and_overflow_onto_new_pages() {
+    // 200 × 287 mm inside the printer margin: two 90 mm Sheets across, three rows down.
+    let mut job = job([90.0, 90.0], vec![]);
+    job.sheets_mm = vec![[90.0, 90.0]; 7];
+    let layout = nest_valid(&job, 1);
+    assert_eq!(layout.pages(), 2);
+    let pages: Vec<_> = layout.sheets.iter().map(|sheet| sheet.page).collect();
+    assert_eq!(pages, [0, 0, 0, 0, 0, 0, 1]);
+    assert_eq!(layout.sheets[0].origin_mm, [5.0, 5.0], "from the top left");
+    assert_eq!(
+        layout.sheets[6].origin_mm,
+        [5.0, 5.0],
+        "a new page starts again"
+    );
+    assert_eq!(layout.sheets[1].origin_mm[1], 5.0, "same row");
+
+    // Each page shows only its own Sheets' outlines.
+    let outlines = |page| {
+        render_page(&job, &layout, page)
+            .matches(r#"stroke="black""#)
+            .count()
+    };
+    assert_eq!((outlines(0), outlines(1)), (6, 1));
+}
+
+#[test]
+fn a_sheet_wider_than_a_row_starts_the_next_one() {
+    let mut job = job([90.0, 90.0], vec![]);
+    job.sheets_mm = vec![[90.0, 40.0], [150.0, 60.0], [40.0, 30.0]];
+    let layout = nest_valid(&job, 1);
+    assert_eq!(layout.pages(), 1);
+    assert!(layout.sheets[1].origin_mm[1] >= 45.0, "below the first");
+    assert!(layout.sheets[2].origin_mm[0] > 150.0, "beside the second");
+}
+
+#[test]
+fn rejects_a_job_without_sheets() {
+    let mut job = job([90.0, 90.0], vec![]);
+    job.sheets_mm.clear();
+    assert!(matches!(try_nest(&job, 1), Err(NestError::InvalidSettings)));
+}
+
+#[test]
+fn fixed_items_stay_on_the_first_sheet_while_they_fit() {
+    for seed in SEEDS {
+        let mut job = job([50.0, 30.0], vec![square(10.0, Fixed(3))]);
+        job.sheets_mm.push([50.0, 30.0]);
+        let layout = nest_valid(&job, seed);
+        assert_eq!(layout.placed, [3], "seed {seed}");
+        assert!(layout.sheets[1].placements.is_empty(), "seed {seed}");
+    }
+}
+
+#[test]
+fn fixed_items_fill_the_sheets_in_order() {
+    // 27 mm inside the edge margin: room for one 20 mm square per Sheet.
+    for seed in SEEDS {
+        let mut job = job([30.0, 30.0], vec![square(20.0, Fixed(3))]);
+        job.sheets_mm = vec![[30.0, 30.0]; 4];
+        let layout = nest_valid(&job, seed);
+        let on: Vec<_> = layout.sheets.iter().map(|s| s.placements.len()).collect();
+        assert_eq!(on, [1, 1, 1, 0], "seed {seed}");
+    }
+}
+
+#[test]
+fn what_fits_no_sheet_is_missing() {
+    for seed in SEEDS {
+        let mut job = job([50.0, 30.0], vec![square(10.0, Fixed(20))]);
+        job.sheets_mm.push([50.0, 30.0]);
+        let layout = nest_valid(&job, seed);
+        assert!(layout.missing[0] >= 4, "seed {seed}: {:?}", layout.missing);
+    }
+}
+
+#[test]
+fn a_piece_too_large_for_one_sheet_goes_on_another() {
+    for seed in SEEDS {
+        let mut job = job(
+            [30.0, 30.0],
+            vec![square(25.0, Fixed(1)), square(40.0, Fixed(1))],
+        );
+        job.sheets_mm.push([100.0, 50.0]);
+        let layout = nest_valid(&job, seed);
+        assert_eq!(layout.missing, [0, 0], "seed {seed}");
+        assert!(
+            layout.sheets[0].placements.iter().all(|p| p.item == 0),
+            "seed {seed}: only the small one fits the first sheet"
+        );
+    }
+}
+
+#[test]
+fn fill_uses_every_sheet() {
+    let mut job = job(
+        [50.0, 30.0],
+        vec![square(10.0, Fixed(8)), square(10.0, Fill)],
+    );
+    job.sheets_mm.push([50.0, 30.0]);
+    let layout = nest_valid(&job, 1);
+    assert!(
+        layout.sheets[1].placements.iter().any(|p| p.item == 1),
+        "{:?}",
+        layout.placed
+    );
 }
