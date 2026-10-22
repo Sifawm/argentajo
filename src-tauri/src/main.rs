@@ -274,6 +274,8 @@ struct ItemRequest {
     id: String,
     size_id: String,
     quantity: Quantity,
+    #[serde(default)]
+    fixed: bool,
 }
 
 /// The Pieces of the Job file opened last, by their `job-<index>` id: the copies saved with it,
@@ -451,7 +453,10 @@ fn save_job_file(
     output: State<Mutex<Output>>,
     job: JobRequest,
 ) -> Result<bool, String> {
-    let job = resolve(&app, job)?;
+    let mut job = resolve(&app, job)?;
+    for item in &mut job.items {
+        item.piece = piece_at_size(&item.piece, &item.size_id).unwrap_or_else(|| item.piece.clone());
+    }
     let saved = {
         let output = output.lock().unwrap();
         let layout = output
@@ -525,6 +530,7 @@ fn open_job_file(
             id: id.clone(),
             size_id: item.size_id.clone(),
             quantity: item.quantity,
+            fixed: true,
         });
         pieces.push(PieceView::new(Some(id.clone()), piece.clone()));
         by_id.insert(id, piece);

@@ -30,12 +30,19 @@ export interface JobRequest {
    * Pieces from the Library or the Job file opened last, each at one of their Sizes, with a fixed
    * quantity or "fill" for as many as fit in the silver left.
    */
-  items: { id: string; size_id: string; quantity: { fixed: number } | "fill" }[];
+  items: { id: string; size_id: string; quantity: { fixed: number } | "fill"; fixed?: boolean }[];
 }
 
 export type PaperName = keyof typeof PAPERS | "custom";
 /** The quantity is kept while the item is on fill, for when it's switched back. */
-export type Item = { id: string; size: string; quantity: number; fill: boolean };
+export type Item = {
+  id: string;
+  size: string;
+  quantity: number;
+  fill: boolean;
+  /** True when the Item came from a reopened Job file and its Size must stay fixed. */
+  fixed?: boolean;
+};
 
 /** A Job as it's edited. Sizes in mm, the time limit in seconds. */
 export interface JobSettings {
@@ -66,10 +73,11 @@ export const toJobRequest = (settings: JobSettings): JobRequest => {
     separationMm: settings.separation,
     edgeMarginMm: settings.edgeMargin,
     timeLimitS: settings.timeLimit,
-    items: settings.items.map(({ id, size, quantity, fill }) => ({
+    items: settings.items.map(({ id, size, quantity, fill, fixed }) => ({
       id,
       size_id: size ?? NORMAL_SIZE_ID,
       quantity: fill ? "fill" : { fixed: quantity },
+      fixed: fixed ?? false,
     })),
   };
 };
@@ -90,10 +98,10 @@ export const fromJobRequest = (job: JobRequest): JobSettings => {
     separation: job.separationMm,
     edgeMargin: job.edgeMarginMm,
     timeLimit: job.timeLimitS,
-    items: job.items.map(({ id, size_id, quantity }) =>
+    items: job.items.map(({ id, size_id, quantity, fixed }) =>
       quantity === "fill"
-        ? { id, size: size_id, quantity: 1, fill: true }
-        : { id, size: size_id, quantity: quantity.fixed, fill: false },
+        ? { id, size: size_id, quantity: 1, fill: true, fixed }
+        : { id, size: size_id, quantity: quantity.fixed, fill: false, fixed },
     ),
   };
 };

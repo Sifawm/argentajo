@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { TFunction } from "i18next";
+import { formatSize, type Unit } from "./preferences";
 
 /** A named real Size of a Piece: a side in mm, the other follows the proportions. */
 export interface Size {
@@ -35,6 +37,14 @@ export const sizeDimensions = (piece: PieceView, sizeId: string): [number, numbe
       : size.measure.height / h
     : 1;
   return [w * scale, h * scale];
+};
+
+/** "Name · W × H unit" for a Size of a Piece. */
+export const sizeLabel = (piece: PieceView, sizeId: string, unit: Unit, t: TFunction): string => {
+  const size = piece.sizes.find((s) => s.id === sizeId);
+  if (!size) return "";
+  const dims = sizeDimensions(piece, sizeId);
+  return `${size.name} · ${dims ? formatSize(t, dims, unit) : ""}`;
 };
 
 /** Mirrors `core::piece::PrepareOptions`. Sizes are in mm. */

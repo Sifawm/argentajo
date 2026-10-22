@@ -1,4 +1,6 @@
 import {
+  ArrowDown,
+  ArrowUp,
   Brush,
   Eraser,
   Maximize,
@@ -62,7 +64,7 @@ type EditorSize = {
   text: string;
 };
 
-const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const newId = () => crypto.randomUUID();
 
 const formatMeasure = (mm: number, unit: Parameters<typeof toUnit>[1]) =>
   String(Number(toUnit(mm, unit).toFixed(2)));
@@ -184,15 +186,20 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
 
   const validationErrors = useMemo(() => {
     const errors: Record<string, string> = {};
-    const seen = new Set<string>();
+    const seenIds = new Set<string>();
+    const seenNames = new Set<string>();
     sizes.forEach((size, index) => {
+      if (seenIds.has(size.id)) {
+        errors[size.id] = t("duplicateSizeId");
+      }
+      seenIds.add(size.id);
       const trimmed = size.name.trim();
       if (trimmed === "") {
         errors[size.id] = t("emptySizeName");
-      } else if ([...seen].some((n) => n.toLowerCase() === trimmed.toLowerCase())) {
+      } else if ([...seenNames].some((n) => n.toLowerCase() === trimmed.toLowerCase())) {
         errors[size.id] = t("duplicateSizeName");
       }
-      seen.add(trimmed);
+      seenNames.add(trimmed);
       if (index > 0 && !toMeasure(size, unit)) {
         errors[size.id] = t("sizeMeasure");
       }
@@ -669,6 +676,26 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     });
   };
 
+  const moveUp = (id: string) => {
+    setSizes((sizes) => {
+      const index = sizes.findIndex((s) => s.id === id);
+      if (index <= 0) return sizes;
+      const next = [...sizes];
+      [next[index - 1], next[index]] = [next[index], next[index - 1]];
+      return next;
+    });
+  };
+
+  const moveDown = (id: string) => {
+    setSizes((sizes) => {
+      const index = sizes.findIndex((s) => s.id === id);
+      if (index < 0 || index >= sizes.length - 1) return sizes;
+      const next = [...sizes];
+      [next[index], next[index + 1]] = [next[index + 1], next[index]];
+      return next;
+    });
+  };
+
   const deleteSize = (id: string) => {
     if (sizes.length <= 1) return;
     setSizes((sizes) => sizes.filter((s) => s.id !== id));
@@ -904,6 +931,26 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
                             className="shrink-0 rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-100 disabled:opacity-40"
                           >
                             {t("makeDefault")}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => moveUp(size.id)}
+                            disabled={index === 0}
+                            aria-label={t("moveUp")}
+                            title={t("moveUp")}
+                            className="shrink-0 rounded-md border border-zinc-300 p-1.5 text-zinc-600 hover:bg-zinc-100 disabled:opacity-40"
+                          >
+                            <ArrowUp aria-hidden className="size-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => moveDown(size.id)}
+                            disabled={index === sizes.length - 1}
+                            aria-label={t("moveDown")}
+                            title={t("moveDown")}
+                            className="shrink-0 rounded-md border border-zinc-300 p-1.5 text-zinc-600 hover:bg-zinc-100 disabled:opacity-40"
+                          >
+                            <ArrowDown aria-hidden className="size-4" />
                           </button>
                           <button
                             type="button"

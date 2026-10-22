@@ -11,8 +11,8 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import PieceEditor from "./PieceEditor";
-import { deletePiece, listLibrary, openPiece, type PieceView, sizeDimensions } from "./library";
-import { formatSize, usePreferences } from "./preferences";
+import { deletePiece, listLibrary, openPiece, type PieceView, sizeLabel } from "./library";
+import { usePreferences } from "./preferences";
 
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/svg+xml"];
 
@@ -58,15 +58,12 @@ export default function LibraryView({ pieces, setPieces }: Props) {
     void open(e.dataTransfer.files[0]);
   };
 
-  const label = (piece: PieceView, sizeId: string) => {
-    const size = piece.sizes.find((s) => s.id === sizeId);
-    if (!size) return "";
-    const dims = sizeDimensions(piece, sizeId);
-    return `${size.name} · ${dims ? formatSize(t, dims, unit) : ""}`;
-  };
-
-  const defaultLabel = (piece: PieceView) => label(piece, piece.sizes[0]?.id ?? "");
-  const allSizesLabel = (piece: PieceView) => piece.sizes.map((s) => label(piece, s.id)).join("\n");
+  const defaultLabel = (piece: PieceView) => sizeLabel(piece, piece.sizes[0]?.id ?? "", unit, t);
+  const allSizesLabel = (piece: PieceView) =>
+    piece.sizes
+      .slice(1)
+      .map((s) => sizeLabel(piece, s.id, unit, t))
+      .join("\n");
 
   return (
     <section
