@@ -1,6 +1,23 @@
-import { Brush, Eraser, TriangleAlert } from "lucide-react";
+import {
+  Brush,
+  Eraser,
+  Maximize,
+  Redo2,
+  TriangleAlert,
+  Undo2,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import { Dialog, Slider, ToggleGroup } from "radix-ui";
-import { type PointerEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type PointerEvent,
+  type ReactNode,
+  type WheelEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import {
   addToLibrary,
@@ -12,12 +29,16 @@ import {
   updatePiece,
 } from "./library";
 import { formatSize, fromUnit, toUnit, usePreferences } from "./preferences";
+import { createStrokeHistory, type Stroke } from "./strokeHistory";
 
 type Side = "width" | "height";
 type Tool = "brush" | "eraser";
 
 // Green outweighs red for the brush, not for the eraser: the convention `core` reads (`PrepareOptions::edits`).
 const TOOL_COLOR: Record<Tool, string> = { brush: "#22c55e", eraser: "#ef4444" };
+const PADDING = 16; // 1rem each side; the spec's 2rem total margin around the image.
+const MIN_BRUSH = 2;
+const MAX_BRUSH = 100;
 
 interface Props {
   image: Uint8Array<ArrayBuffer>;
@@ -55,10 +76,47 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
   const [tool, setTool] = useState<Tool>();
   const [brushSize, setBrushSize] = useState(20);
   const [edits, setEdits] = useState(saved?.edits);
-  // Painted in source pixels; it outlives tolerance and size changes for the whole session.
+  const [zoom, setZoom] = useState(1);
+  const [fittedSize, setFittedSize] = useState<{ width: number; height: number; scale: number }>();
+  const [cursor, setCursor] = useState<{ x: number; y: number }>();
+  const [cursorVisible, setCursorVisible] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  const [spacePressed, setSpacePressed] = useState(false);
+  const [isSizing, setIsSizing] = useState(false);
+  const [, setHistoryTick] = useState(0);
+
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
-  const lastPoint = useRef<DOMPoint>(undefined);
-  const painted = useRef(false);
+  const baseBitmap = useRef<ImageBitmap | undefined>(undefined);
+  const savedEdits = useRef(saved?.edits);
+  const historyRef = useRef(createStrokeHistory());
+  const currentStroke = useRef<{ tool: Tool; width: number; points: DOMPoint[] } | undefined>(
+    undefined,
+  );
+  const lastPoint = useRef<DOMPoint | undefined>(undefined);
+  const isPanningRef = useRef(false);
+  const panStart = useRef<
+    { scrollLeft: number; scrollTop: number; x: number; y: number } | undefined
+  >(undefined);
+  const spacePressedRef = useRef(false);
+  const cursorVisibleRef = useRef(false);
+  const toolRef = useRef<Tool | undefined>(tool);
+  const brushSizeRef = useRef(brushSize);
+  const zoomRef = useRef(zoom);
+  const fitScaleRef = useRef(fittedSize?.scale ?? 1);
+
+  useEffect(() => {
+    toolRef.current = tool;
+  }, [tool]);
+  useEffect(() => {
+    brushSizeRef.current = brushSize;
+  }, [brushSize]);
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+  useEffect(() => {
+    if (fittedSize) fitScaleRef.current = fittedSize.scale;
+  }, [fittedSize]);
 
   useEffect(() => {
     const url = URL.createObjectURL(new Blob([image], { type }));
@@ -76,20 +134,53 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
   // Decoded by `core` (SVGs rasterised), so the overlay and the edits share its pixel grid.
   const [sourceW, sourceH] = preview?.sourcePx ?? [];
 
-  // Saved strokes go onto the canvas once it exists, so they stay editable. No painting until
-  // then, or the first stroke's export would drop them.
-  const savedEdits = useRef(saved?.edits);
+  // Fit the source image inside the container with a small margin; zoom scales this wrapper.
+  const updateFit = () => {
+    const container = containerRef.current;
+    if (!container || !sourceW || !sourceH) return;
+    const availW = Math.max(0, container.clientWidth - PADDING * 2);
+    const availH = Math.max(0, container.clientHeight - PADDING * 2);
+    if (availW <= 0 || availH <= 0) return;
+    const aspect = sourceW / sourceH;
+    let width: number;
+    let height: number;
+    if (availW / availH > aspect) {
+      height = availH;
+      width = height * aspect;
+    } else {
+      width = availW;
+      height = width / aspect;
+    }
+    setFittedSize({ width, height, scale: width / sourceW });
+  };
+
   useEffect(() => {
+    updateFit();
+    const container = containerRef.current;
+    if (!container) return;
+    const ro = new ResizeObserver(updateFit);
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [sourceW, sourceH]);
+
+  // Decode saved edits once and draw them as the non-undoable base layer.
+  useEffect(() => {
+    if (!sourceW || !sourceH) return;
     const ctx = canvas.current?.getContext("2d");
-    const png = savedEdits.current;
-    if (!ctx || !png) return;
-    void createImageBitmap(new Blob([png], { type: "image/png" })).then((bitmap) => {
-      if (!savedEdits.current) return;
-      ctx.drawImage(bitmap, 0, 0);
-      savedEdits.current = undefined;
-      painted.current = true;
-    });
-  }, [sourceW]);
+    if (!ctx) return;
+    if (savedEdits.current) {
+      void createImageBitmap(new Blob([savedEdits.current], { type: "image/png" })).then(
+        (bitmap) => {
+          baseBitmap.current = bitmap;
+          savedEdits.current = undefined;
+          ctx.clearRect(0, 0, sourceW, sourceH);
+          ctx.drawImage(bitmap, 0, 0);
+        },
+      );
+    } else {
+      ctx.clearRect(0, 0, sourceW, sourceH);
+    }
+  }, [sourceW, sourceH]);
 
   // Re-prepare live, debounced so dragging the slider doesn't queue up a run per step.
   useEffect(() => {
@@ -115,14 +206,44 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
 
   const exportEdits = () =>
     new Promise<Edits | undefined>((resolve) => {
-      // Until saved strokes are on the canvas, they are still the edits.
-      if (!painted.current || !canvas.current) return resolve(edits);
+      if (!canvas.current) return resolve(edits);
       canvas.current.toBlob((png) =>
         png
           ? png.arrayBuffer().then((buffer) => resolve(new Uint8Array(buffer)))
           : resolve(undefined),
       );
     });
+
+  const drawStroke = (ctx: CanvasRenderingContext2D, stroke: Stroke) => {
+    if (stroke.points.length === 0) return;
+    ctx.strokeStyle = ctx.fillStyle = TOOL_COLOR[stroke.tool];
+    ctx.lineWidth = stroke.width;
+    ctx.lineCap = ctx.lineJoin = "round";
+    const [first, ...rest] = stroke.points;
+    ctx.beginPath();
+    ctx.arc(first.x, first.y, stroke.width / 2, 0, 2 * Math.PI);
+    ctx.fill();
+    if (rest.length > 0) {
+      ctx.beginPath();
+      ctx.moveTo(first.x, first.y);
+      for (const p of rest) ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+    }
+  };
+
+  const replay = async () => {
+    const ctx = canvas.current?.getContext("2d");
+    if (!ctx || !sourceW || !sourceH) return;
+    ctx.clearRect(0, 0, sourceW, sourceH);
+    if (baseBitmap.current) {
+      ctx.drawImage(baseBitmap.current, 0, 0);
+    }
+    for (const stroke of historyRef.current.inEffect()) {
+      drawStroke(ctx, stroke);
+    }
+    const next = await exportEdits();
+    setEdits(next);
+  };
 
   const accept = (split: boolean) => {
     if (!options) return;
@@ -143,14 +264,70 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
       });
   };
 
+  const doUndo = () => {
+    if (!historyRef.current.undo()) return;
+    setHistoryTick((n) => n + 1);
+    void replay();
+  };
+
+  const doRedo = () => {
+    if (!historyRef.current.redo()) return;
+    setHistoryTick((n) => n + 1);
+    void replay();
+  };
+
+  const setBrushSizeAndRef = (value: number) => {
+    setBrushSize(value);
+    brushSizeRef.current = value;
+  };
+
+  const adjustBrush = (delta: number) => {
+    setBrushSizeAndRef(Math.min(MAX_BRUSH, Math.max(MIN_BRUSH, brushSize + delta)));
+  };
+
+  const zoomBy = (ratio: number, center?: { x: number; y: number }) => {
+    const container = containerRef.current;
+    if (!container || !fittedSize) return;
+    const next = Math.min(16, Math.max(1, zoomRef.current * ratio));
+    if (next === zoomRef.current) return;
+    const px = center?.x ?? container.clientWidth / 2 - PADDING;
+    const py = center?.y ?? container.clientHeight / 2 - PADDING;
+    const r = next / zoomRef.current;
+    container.scrollLeft = (container.scrollLeft + px) * r - px;
+    container.scrollTop = (container.scrollTop + py) * r - py;
+    zoomRef.current = next;
+    setZoom(next);
+  };
+
+  const zoomIn = () => zoomBy(1.25);
+  const zoomOut = () => zoomBy(1 / 1.25);
+  const fit = () => {
+    if (!containerRef.current) return;
+    zoomRef.current = 1;
+    setZoom(1);
+    containerRef.current.scrollLeft = 0;
+    containerRef.current.scrollTop = 0;
+  };
+
+  const handleWheelZoom = (e: WheelEvent<HTMLDivElement>) => {
+    const container = containerRef.current;
+    if (!container || !fittedSize) return;
+    const rect = container.getBoundingClientRect();
+    const px = e.clientX - rect.left - PADDING;
+    const py = e.clientY - rect.top - PADDING;
+    const factor = Math.exp(-e.deltaY * 0.002);
+    zoomBy(factor, { x: px, y: py });
+  };
+
   // A dot on press, then a segment per move; the silhouette is re-prepared once the stroke ends.
   const paint = (e: PointerEvent<SVGSVGElement>, from?: DOMPoint) => {
     const ctx = canvas.current?.getContext("2d");
     const toSource = e.currentTarget.getScreenCTM()?.inverse();
-    if (!tool || !ctx || !toSource || savedEdits.current) return;
+    if (!toolRef.current || !ctx || !toSource || !sourceW || !sourceH) return;
     const point = new DOMPoint(e.clientX, e.clientY).matrixTransform(toSource);
-    const width = brushSize * toSource.a;
-    ctx.strokeStyle = ctx.fillStyle = TOOL_COLOR[tool];
+    const width = brushSizeRef.current / (fitScaleRef.current * zoomRef.current);
+    const paintTool = toolRef.current;
+    ctx.strokeStyle = ctx.fillStyle = TOOL_COLOR[paintTool];
     ctx.lineWidth = width;
     ctx.lineCap = ctx.lineJoin = "round";
     ctx.beginPath();
@@ -163,14 +340,179 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
       ctx.fill();
     }
     lastPoint.current = point;
-    painted.current = true;
+  };
+
+  const startStroke = (e: PointerEvent<SVGSVGElement>) => {
+    const toSource = e.currentTarget.getScreenCTM()?.inverse();
+    if (!toolRef.current || !toSource) return;
+    const point = new DOMPoint(e.clientX, e.clientY).matrixTransform(toSource);
+    currentStroke.current = {
+      tool: toolRef.current,
+      width: brushSizeRef.current / (fitScaleRef.current * zoomRef.current),
+      points: [point],
+    };
+    paint(e);
   };
 
   const endStroke = () => {
-    if (!lastPoint.current) return;
+    const stroke = currentStroke.current;
+    currentStroke.current = undefined;
     lastPoint.current = undefined;
-    void exportEdits().then(setEdits);
+    if (!stroke || stroke.points.length === 0) return;
+    historyRef.current.add(stroke);
+    setHistoryTick((n) => n + 1);
+    void replay();
   };
+
+  const updateCursor = (e: PointerEvent<SVGSVGElement>) => {
+    const container = containerRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    setCursor({
+      x: e.clientX - rect.left - PADDING,
+      y: e.clientY - rect.top - PADDING,
+    });
+  };
+
+  const onPointerDown = (e: PointerEvent<SVGSVGElement>) => {
+    if (e.button !== 0 && e.button !== 1) return;
+    const canPan = e.button === 1 || spacePressedRef.current || !toolRef.current;
+    if (canPan) {
+      e.preventDefault();
+      isPanningRef.current = true;
+      setIsPanning(true);
+      panStart.current = {
+        scrollLeft: containerRef.current!.scrollLeft,
+        scrollTop: containerRef.current!.scrollTop,
+        x: e.clientX,
+        y: e.clientY,
+      };
+      e.currentTarget.setPointerCapture(e.pointerId);
+      return;
+    }
+    if (e.button === 0 && toolRef.current) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      startStroke(e);
+    }
+  };
+
+  const onPointerMove = (e: PointerEvent<SVGSVGElement>) => {
+    updateCursor(e);
+    if (isPanningRef.current) {
+      const start = panStart.current;
+      const container = containerRef.current;
+      if (!start || !container) return;
+      container.scrollLeft = start.scrollLeft - (e.clientX - start.x);
+      container.scrollTop = start.scrollTop - (e.clientY - start.y);
+      return;
+    }
+    if (!lastPoint.current) return;
+    paint(e, lastPoint.current);
+    if (currentStroke.current) {
+      currentStroke.current.points.push(lastPoint.current);
+    }
+  };
+
+  const onPointerUp = () => {
+    if (isPanningRef.current) {
+      isPanningRef.current = false;
+      setIsPanning(false);
+      panStart.current = undefined;
+      return;
+    }
+    endStroke();
+  };
+
+  const onPointerEnter = () => {
+    cursorVisibleRef.current = true;
+    setCursorVisible(true);
+  };
+
+  const onPointerLeave = () => {
+    cursorVisibleRef.current = false;
+    setCursorVisible(false);
+  };
+
+  // Keyboard shortcuts for zoom, brush size and undo/redo; Space is a pan modifier over the image.
+  useEffect(() => {
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      const target = e.target;
+      const inInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+
+      if (e.key === " " && cursorVisibleRef.current && !inInput) {
+        e.preventDefault();
+        spacePressedRef.current = true;
+        setSpacePressed(true);
+        return;
+      }
+
+      if (inInput) return;
+
+      if (e.ctrlKey || e.metaKey) {
+        const key = e.key.toLowerCase();
+        if (key === "z") {
+          e.preventDefault();
+          if (e.shiftKey) doRedo();
+          else doUndo();
+          return;
+        }
+        if (key === "y") {
+          e.preventDefault();
+          doRedo();
+          return;
+        }
+      }
+
+      if (e.key === "+" || e.key === "Add") {
+        e.preventDefault();
+        zoomIn();
+      } else if (e.key === "-" || e.key === "Subtract") {
+        e.preventDefault();
+        zoomOut();
+      } else if (e.key === "0") {
+        e.preventDefault();
+        fit();
+      } else if (e.key === "[") {
+        e.preventDefault();
+        adjustBrush(-2);
+      } else if (e.key === "]") {
+        e.preventDefault();
+        adjustBrush(2);
+      }
+    };
+
+    const onKeyUp = (e: globalThis.KeyboardEvent) => {
+      if (e.key === " ") {
+        spacePressedRef.current = false;
+        setSpacePressed(false);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, []);
+
+  const containerCursor = useMemo(() => {
+    if (isPanning) return "cursor-grabbing";
+    if (spacePressed) return "cursor-grab";
+    if (!tool) return "cursor-grab";
+    return "cursor-none";
+  }, [isPanning, spacePressed, tool]);
+
+  const renderCursor = (cx: number, cy: number) => (
+    <g>
+      <circle cx={cx} cy={cy} r={brushSize / 2} stroke="white" strokeWidth={2} fill="none" />
+      <circle cx={cx} cy={cy} r={brushSize / 2} stroke="black" strokeWidth={1} fill="none" />
+      <line x1={cx - 2} y1={cy} x2={cx + 2} y2={cy} stroke="white" strokeWidth={2} />
+      <line x1={cx} y1={cy - 2} x2={cx} y2={cy + 2} stroke="white" strokeWidth={2} />
+      <line x1={cx - 2} y1={cy} x2={cx + 2} y2={cy} stroke="black" strokeWidth={1} />
+      <line x1={cx} y1={cy - 2} x2={cx} y2={cy + 2} stroke="black" strokeWidth={1} />
+    </g>
+  );
 
   const slider = (
     label: string,
@@ -178,12 +520,17 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     min: number,
     max: number,
     onChange: (value: number) => void,
+    onPointerDown?: () => void,
+    onPointerUp?: () => void,
   ) => (
     <Slider.Root
       min={min}
       max={max}
       value={[value]}
       onValueChange={([value]) => onChange(value)}
+      onPointerDown={onPointerDown}
+      onPointerUp={onPointerUp}
+      onPointerLeave={onPointerUp}
       className="relative flex h-5 touch-none items-center"
     >
       <Slider.Track className="relative h-1 grow rounded-full bg-zinc-200">
@@ -226,6 +573,10 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     </label>
   );
 
+  const cursorOverlayVisible = tool && !isPanning && (cursorVisible || isSizing);
+  const centerX = (containerRef.current?.clientWidth ?? 0) / 2 - PADDING;
+  const centerY = (containerRef.current?.clientHeight ?? 0) / 2 - PADDING;
+
   return (
     <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
       <Dialog.Portal>
@@ -235,52 +586,77 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
           <Dialog.Description className="sr-only">{t("editorDescription")}</Dialog.Description>
 
           <div className="flex min-h-0 flex-1 gap-6">
-            <div className="checkerboard relative min-w-0 flex-1 rounded-md">
-              {sourceUrl && preview && (
+            <div
+              ref={containerRef}
+              className={`checkerboard relative min-w-0 flex-1 overflow-auto rounded-md p-4 ${containerCursor}`}
+              onWheel={(e) => {
+                if (e.ctrlKey) {
+                  e.preventDefault();
+                  handleWheelZoom(e);
+                }
+              }}
+            >
+              {sourceUrl && preview && fittedSize && (
                 <>
-                  <svg
-                    viewBox={`0 0 ${sourceW} ${sourceH}`}
-                    className={`absolute inset-4 size-[calc(100%-2rem)] touch-none overflow-visible ${tool ? "cursor-crosshair" : ""}`}
-                    role="img"
-                    aria-label={t("silhouette")}
-                    onPointerDown={(e) => {
-                      if (!tool || e.button !== 0) return;
-                      e.currentTarget.setPointerCapture(e.pointerId);
-                      paint(e);
+                  <div
+                    style={{
+                      width: fittedSize.width * zoom,
+                      height: fittedSize.height * zoom,
                     }}
-                    onPointerMove={(e) => lastPoint.current && paint(e, lastPoint.current)}
-                    onPointerUp={endStroke}
-                    onPointerCancel={endStroke}
+                    className="relative"
                   >
-                    {/* Faded, so what was removed as background can still be brushed back. */}
-                    <image href={sourceUrl} width={sourceW} height={sourceH} opacity={0.25} />
-                    <g
-                      transform={`translate(${preview.offsetPx[0]} ${preview.offsetPx[1]}) scale(${preview.sizePx[0] / preview.sizeMm[0]})`}
+                    <svg
+                      viewBox={`0 0 ${sourceW} ${sourceH}`}
+                      className="absolute inset-0 size-full touch-none"
+                      role="img"
+                      aria-label={t("silhouette")}
+                      onPointerDown={onPointerDown}
+                      onPointerMove={onPointerMove}
+                      onPointerUp={onPointerUp}
+                      onPointerCancel={onPointerUp}
+                      onPointerEnter={onPointerEnter}
+                      onPointerLeave={onPointerLeave}
                     >
-                      <image
-                        href={preview.image}
-                        width={preview.sizeMm[0]}
-                        height={preview.sizeMm[1]}
-                      />
-                      {preview.contours.map((contour, i) => (
-                        <polygon
-                          key={i}
-                          points={contour.map(([x, y]) => `${x},${y}`).join(" ")}
-                          fill="none"
-                          stroke="#0ea5e9"
-                          strokeWidth={2}
-                          vectorEffect="non-scaling-stroke"
+                      {/* Faded, so what was removed as background can still be brushed back. */}
+                      <image href={sourceUrl} width={sourceW} height={sourceH} opacity={0.25} />
+                      <g
+                        transform={`translate(${preview.offsetPx[0]} ${preview.offsetPx[1]}) scale(${preview.sizePx[0] / preview.sizeMm[0]})`}
+                      >
+                        <image
+                          href={preview.image}
+                          width={preview.sizeMm[0]}
+                          height={preview.sizeMm[1]}
                         />
-                      ))}
-                    </g>
-                  </svg>
-                  {/* Letterboxed like the SVG above, so both share the source pixel grid. */}
-                  <canvas
-                    ref={canvas}
-                    width={sourceW}
-                    height={sourceH}
-                    className="pointer-events-none absolute inset-4 size-[calc(100%-2rem)] object-contain opacity-40"
-                  />
+                        {preview.contours.map((contour, i) => (
+                          <polygon
+                            key={i}
+                            points={contour.map(([x, y]) => `${x},${y}`).join(" ")}
+                            fill="none"
+                            stroke="#0ea5e9"
+                            strokeWidth={2}
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        ))}
+                      </g>
+                    </svg>
+                    {/* Scaled exactly like the SVG, so it stays pixel-aligned. */}
+                    <canvas
+                      ref={canvas}
+                      width={sourceW}
+                      height={sourceH}
+                      className="pointer-events-none absolute inset-0 size-full opacity-40"
+                    />
+                  </div>
+                  {cursorOverlayVisible && (
+                    <svg
+                      className="pointer-events-none absolute inset-4 overflow-hidden"
+                      width="100%"
+                      height="100%"
+                    >
+                      {cursorVisible && cursor && renderCursor(cursor.x, cursor.y)}
+                      {isSizing && renderCursor(centerX, centerY)}
+                    </svg>
+                  )}
                 </>
               )}
             </div>
@@ -305,11 +681,69 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
                   {toolButton("brush", <Brush aria-hidden className="size-4" />)}
                   {toolButton("eraser", <Eraser aria-hidden className="size-4" />)}
                 </ToggleGroup.Root>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    disabled={!historyRef.current.canUndo()}
+                    onClick={doUndo}
+                    aria-label={t("undo")}
+                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-40"
+                  >
+                    <Undo2 aria-hidden className="size-4" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!historyRef.current.canRedo()}
+                    onClick={doRedo}
+                    aria-label={t("redo")}
+                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-40"
+                  >
+                    <Redo2 aria-hidden className="size-4" />
+                  </button>
+                </div>
                 <span>
                   {t("brushSize")}: {brushSize}
                 </span>
-                {slider(t("brushSize"), brushSize, 2, 100, setBrushSize)}
+                {slider(
+                  t("brushSize"),
+                  brushSize,
+                  MIN_BRUSH,
+                  MAX_BRUSH,
+                  setBrushSizeAndRef,
+                  () => setIsSizing(true),
+                  () => setIsSizing(false),
+                )}
                 <span className="text-xs text-zinc-500">{t("toolsHint")}</span>
+              </div>
+
+              <div className="flex flex-col gap-2 text-sm">
+                <span>{Math.round(zoom * 100)}%</span>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={zoomOut}
+                    aria-label={t("zoomOut")}
+                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-40"
+                  >
+                    <ZoomOut aria-hidden className="size-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={fit}
+                    aria-label={t("fit")}
+                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-40"
+                  >
+                    <Maximize aria-hidden className="size-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={zoomIn}
+                    aria-label={t("zoomIn")}
+                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-40"
+                  >
+                    <ZoomIn aria-hidden className="size-4" />
+                  </button>
+                </div>
               </div>
 
               <div className="flex gap-3">
