@@ -12,6 +12,7 @@ import {
 import { useTranslation } from "react-i18next";
 import PieceEditor from "./PieceEditor";
 import { deletePiece, listLibrary, openPiece, type PieceView } from "./library";
+import { formatSize, usePreferences } from "./preferences";
 
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/svg+xml"];
 
@@ -23,6 +24,7 @@ interface Props {
 
 export default function LibraryView({ pieces, setPieces }: Props) {
   const { t } = useTranslation("library");
+  const { unit } = usePreferences();
   const [error, setError] = useState<string>();
   const [editing, setEditing] =
     useState<Pick<ComponentProps<typeof PieceEditor>, "image" | "type" | "saved">>();
@@ -127,7 +129,7 @@ export default function LibraryView({ pieces, setPieces }: Props) {
                 <Trash2 aria-hidden className="size-4" />
               </button>
               <span className="text-center text-sm text-zinc-600">
-                {t("sizeMm", { w: piece.sizeMm[0], h: piece.sizeMm[1] })}
+                {formatSize(t, piece.sizeMm, unit)}
               </span>
             </li>
           ))}

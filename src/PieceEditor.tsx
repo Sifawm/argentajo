@@ -11,6 +11,7 @@ import {
   splitToLibrary,
   updatePiece,
 } from "./library";
+import { formatSize, fromUnit, toUnit, usePreferences } from "./preferences";
 
 type Side = "width" | "height";
 type Tool = "brush" | "eraser";
@@ -31,14 +32,16 @@ interface Props {
 
 export default function PieceEditor({ image, type, saved, onClose, onSaved }: Props) {
   const { t } = useTranslation("library");
+  // The editor is modal, so the unit can't change under the typed size.
+  const { unit } = usePreferences();
   const [tolerance, setTolerance] = useState(saved?.options.tolerance ?? 32);
-  // The side the jeweller typed; the other one follows the proportions. Until then, `core` takes
-  // the size from the file's DPI.
+  // The side the jeweller typed, in the display unit; the other one follows the proportions. Until
+  // then, `core` takes the size from the file's DPI.
   const [size, setSize] = useState<{ side: Side; text: string } | undefined>(() => {
     const realSize = saved?.options.size;
     if (!realSize) return undefined;
     // Shown like the computed side; a split piece's width is a long fraction.
-    const text = (mm: number) => String(Number(mm.toFixed(2)));
+    const text = (mm: number) => String(Number(toUnit(mm, unit).toFixed(2)));
     return "width" in realSize
       ? { side: "width", text: text(realSize.width) }
       : { side: "height", text: text(realSize.height) };
@@ -64,7 +67,7 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
   }, [image, type]);
 
   const side = size?.side;
-  const mm = Number(size?.text);
+  const mm = fromUnit(Number(size?.text), unit);
   const options = useMemo<PrepareOptions | undefined>(() => {
     if (side && !(mm > 0)) return undefined;
     const realSize = side === "width" ? { width: mm } : side === "height" ? { height: mm } : null;
@@ -205,12 +208,18 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
 
   const sizeInput = (inputSide: Side, index: 0 | 1) => (
     <label className="flex flex-col gap-1 text-sm">
-      {t(inputSide)}
+      {t(inputSide, { unit })}
       <input
         type="number"
         min="0"
         step="0.1"
-        value={size?.side === inputSide ? size.text : (preview?.sizeMm[index].toFixed(2) ?? "")}
+        value={
+          size?.side === inputSide
+            ? size.text
+            : preview
+              ? toUnit(preview.sizeMm[index], unit).toFixed(2)
+              : ""
+        }
         onChange={(e) => setSize({ side: inputSide, text: e.target.value })}
         className="w-28 rounded-md border border-zinc-300 px-2 py-1"
       />
@@ -309,7 +318,7 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
               </div>
               {preview && (
                 <p className="text-sm text-zinc-600">
-                  {t("sizeMm", { w: preview.sizeMm[0], h: preview.sizeMm[1] })} ·{" "}
+                  {formatSize(t, preview.sizeMm, unit)} ·{" "}
                   {t("sizePx", { w: preview.sizePx[0], h: preview.sizePx[1] })}
                 </p>
               )}

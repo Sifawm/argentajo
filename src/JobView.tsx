@@ -2,6 +2,7 @@ import {
   Bookmark,
   CircleStop,
   FileDown,
+  FilePlus,
   FolderOpen,
   Play,
   Plus,
@@ -19,7 +20,9 @@ import {
   fromJobRequest,
   type Item,
   type JobRequest,
+  type JobSettings,
   loadMySheets,
+  NEW_SHEET,
   type NestView,
   nestJob,
   openJob,
@@ -34,27 +37,34 @@ import {
   toJobRequest,
 } from "./job";
 import type { PieceView } from "./library";
+import {
+  formatSize,
+  fromUnit,
+  isPositive,
+  isSpacing,
+  newJob,
+  toUnit,
+  usePreferences,
+} from "./preferences";
 
 /** What Library thumbnails carry when dragged into the Job. */
 const DRAG_TYPE = "application/x-argentajo-piece";
 
-const NEW_SHEET: Size = [100, 50];
-
-const isPositive = (n: number) => Number.isFinite(n) && n > 0;
-const isSpacing = (n: number) => Number.isFinite(n) && n >= 0;
-
 export default function JobView({ pieces }: { pieces: PieceView[] }) {
   const { t } = useTranslation("job");
-  const [paper, setPaper] = useState<PaperName>("a4");
-  const [customPaper, setCustomPaper] = useState<[number, number]>([210, 297]);
-  const [landscape, setLandscape] = useState(false);
-  const [printerMargin, setPrinterMargin] = useState(5);
-  const [sheets, setSheets] = useState<Size[]>([NEW_SHEET]);
+  const { unit, job: defaults } = usePreferences();
+  // Read once: a Job keeps its values when the defaults change.
+  const [initial] = useState(() => newJob(defaults));
+  const [paper, setPaper] = useState<PaperName>(initial.paper);
+  const [customPaper, setCustomPaper] = useState<Size>(initial.customPaper);
+  const [landscape, setLandscape] = useState(initial.landscape);
+  const [printerMargin, setPrinterMargin] = useState(initial.printerMargin);
+  const [sheets, setSheets] = useState<Size[]>(initial.sheets);
   const [mySheets, setMySheets] = useState<Size[]>([]);
-  const [separation, setSeparation] = useState(1);
-  const [edgeMargin, setEdgeMargin] = useState(1.5);
-  const [timeLimit, setTimeLimit] = useState(60);
-  const [items, setItems] = useState<Item[]>([]);
+  const [separation, setSeparation] = useState(initial.separation);
+  const [edgeMargin, setEdgeMargin] = useState(initial.edgeMargin);
+  const [timeLimit, setTimeLimit] = useState(initial.timeLimit);
+  const [items, setItems] = useState<Item[]>(initial.items);
   // The copies of its pieces the Job file opened last holds, untouched by the Library.
   const [jobPieces, setJobPieces] = useState<PieceView[]>([]);
   // With the request it was calculated for: `placed` and `missing` follow its items.
@@ -186,28 +196,46 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
 
   const saveFile = () => saveJob(job).catch((e) => setError(t("saveFailed", { error: String(e) })));
 
-  // Replaces the Job, and any run in progress, only once the file has opened.
+  /** Replaces the Job, dropping the run in progress, if any. */
+  const load = (
+    settings: JobSettings,
+    pieces: PieceView[],
+    output: OutputOptions,
+    result?: { view: NestView; job: JobRequest },
+  ) => {
+    run.current++;
+    setCalculating(false);
+    setError(undefined);
+    setPaper(settings.paper);
+    setCustomPaper(settings.customPaper);
+    setLandscape(settings.landscape);
+    setPrinterMargin(settings.printerMargin);
+    setSheets(settings.sheets);
+    setSeparation(settings.separation);
+    setEdgeMargin(settings.edgeMargin);
+    setTimeLimit(settings.timeLimit);
+    setItems(settings.items);
+    setJobPieces(pieces);
+    setOutput(output);
+    setResult(result);
+  };
+
+  const newFile = () => {
+    if (calculating) void stopNesting();
+    load(newJob(defaults), [], DEFAULT_OUTPUT);
+  };
+
+  // Only once the file has opened; opening it stops any run.
   const openFile = () =>
     openJob().then(
-      (opened) => {
-        if (!opened) return;
-        run.current++;
-        setCalculating(false);
-        setError(undefined);
-        const settings = fromJobRequest(opened.job);
-        setPaper(settings.paper);
-        setCustomPaper(settings.customPaper);
-        setLandscape(settings.landscape);
-        setPrinterMargin(settings.printerMargin);
-        setSheets(settings.sheets);
-        setSeparation(settings.separation);
-        setEdgeMargin(settings.edgeMargin);
-        setTimeLimit(settings.timeLimit);
-        setItems(settings.items);
-        setJobPieces(opened.pieces);
-        setOutput(opened.output);
-        setResult(opened.result ? { view: opened.result, job: opened.job } : undefined);
-      },
+      (opened) =>
+        opened &&
+        load(
+          fromJobRequest(opened.job),
+          opened.pieces,
+          opened.output,
+          opened.result ? { view: opened.result, job: opened.job } : undefined,
+        ),
       (e) => setError(t("openFailed", { error: String(e) })),
     );
 
@@ -233,6 +261,15 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     </label>
   );
 
+  /** Typed in the display unit, kept in mm. */
+  const lengthInput = (label: string, mm: number, onChange: (mm: number) => void) =>
+    numberInput(
+      t(label, { unit }),
+      toUnit(mm, unit),
+      (value) => onChange(fromUnit(value, unit)),
+      "any",
+    );
+
   const thumbnail = (piece: PieceView, className = "size-12") => (
     <img
       src={piece.image}
@@ -241,8 +278,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     />
   );
 
-  const sizeMm = (piece: PieceView) =>
-    t("library:sizeMm", { w: piece.sizeMm[0], h: piece.sizeMm[1] });
+  const sizeMm = (piece: PieceView) => formatSize(t, piece.sizeMm, unit);
 
   const counts = result?.job.items.flatMap((item, i) => {
     const piece = byId.get(item.id);
@@ -268,6 +304,14 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     <section className="flex min-h-0 flex-1 gap-6">
       <div className="flex w-80 shrink-0 flex-col gap-5 overflow-y-auto pr-2">
         <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={newFile}
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+          >
+            <FilePlus aria-hidden className="size-4" />
+            {t("newJob")}
+          </button>
           <button
             type="button"
             onClick={() => void openFile()}
@@ -304,12 +348,8 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
           </label>
           {paper === "custom" && (
             <div className="flex gap-3">
-              {numberInput(t("widthMm"), customPaper[0], (w) =>
-                setCustomPaper([w, customPaper[1]]),
-              )}
-              {numberInput(t("heightMm"), customPaper[1], (h) =>
-                setCustomPaper([customPaper[0], h]),
-              )}
+              {lengthInput("width", customPaper[0], (w) => setCustomPaper([w, customPaper[1]]))}
+              {lengthInput("height", customPaper[1], (h) => setCustomPaper([customPaper[0], h]))}
             </div>
           )}
           <ToggleGroup.Root
@@ -329,7 +369,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
               </ToggleGroup.Item>
             ))}
           </ToggleGroup.Root>
-          {numberInput(t("printerMargin"), printerMargin, setPrinterMargin)}
+          {lengthInput("printerMargin", printerMargin, setPrinterMargin)}
         </Group>
 
         <Group title={t("sheets")}>
@@ -339,8 +379,8 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
                 setSheets((sheets) => sheets.map((s, j) => (j === i ? size : s)));
               return (
                 <li key={i} className="flex items-end gap-2">
-                  {numberInput(t("widthMm"), sheet[0], (w) => update([w, sheet[1]]))}
-                  {numberInput(t("heightMm"), sheet[1], (h) => update([sheet[0], h]))}
+                  {lengthInput("width", sheet[0], (w) => update([w, sheet[1]]))}
+                  {lengthInput("height", sheet[1], (h) => update([sheet[0], h]))}
                   <button
                     type="button"
                     aria-label={t("saveSheet")}
@@ -377,7 +417,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
               <span className="text-xs text-zinc-500">{t("mySheets")}</span>
               <ul className="flex flex-wrap gap-2">
                 {mySheets.map((size) => {
-                  const label = t("library:sizeMm", { w: size[0], h: size[1] });
+                  const label = formatSize(t, size, unit);
                   return (
                     <li
                       key={size.join("x")}
@@ -406,8 +446,8 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
             </div>
           )}
           <div className="flex gap-3">
-            {numberInput(t("separation"), separation, setSeparation)}
-            {numberInput(t("edgeMargin"), edgeMargin, setEdgeMargin)}
+            {lengthInput("separation", separation, setSeparation)}
+            {lengthInput("edgeMargin", edgeMargin, setEdgeMargin)}
           </div>
         </Group>
 

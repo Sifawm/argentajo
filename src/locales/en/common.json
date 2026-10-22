@@ -1,10 +1,20 @@
 {
   "tagline": "Contour nesting of jewellery templates on silver sheets",
   "coreVersion": "Core version: {{version}}",
-  "language": "Language",
   "views": {
     "label": "Views",
     "library": "Library",
     "job": "Job"
+  },
+  "size": "{{w, number}} × {{h, number}} {{symbol}}",
+  "preferences": {
+    "title": "Preferences",
+    "unit": "Units",
+    "unitHint": "Lengths are kept in mm; px are 96 per inch.",
+    "language": "Language",
+    "job": "New jobs",
+    "jobHint": "Defaults for each new job. Jobs already open keep their own values.",
+    "saveFailed": "Could not save the preferences: {{error}}",
+    "close": "Close"
   }
 }

@@ -12,6 +12,9 @@ export const PAPERS = {
   letter: [215.9, 279.4],
 } as const satisfies Record<string, [number, number]>;
 
+/** A new Job's Sheet, in mm. */
+export const NEW_SHEET: Size = [100, 50];
+
 /** Mirrors the `nest_job` command's request. Sizes in mm. */
 export interface JobRequest {
   /** Oriented as printed. */

@@ -14,33 +14,18 @@ const resources = {
   es: { common: esCommon, library: esLibrary, job: esJob },
 } satisfies Record<Language, unknown>;
 
-const STORAGE_KEY = "language";
-
-function readStoredLanguage(): string | null {
-  try {
-    return localStorage.getItem(STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
-
-export function changeLanguage(language: Language) {
-  try {
-    localStorage.setItem(STORAGE_KEY, language);
-  } catch {
-    // Not persisted; still switch for this session.
-  }
-  return i18n.changeLanguage(language);
-}
-
 i18n.on("languageChanged", (language) => {
   document.documentElement.lang = language;
 });
 
 void i18n.use(initReactI18next).init({
   resources,
-  lng: initialLanguage(readStoredLanguage(), navigator.languages),
+  lng: initialLanguage(null, navigator.languages),
   fallbackLng: defaultLanguage,
   defaultNS: "common",
   interpolation: { escapeValue: false },
 });
+
+/** Switches to the preferred language, or the system's when there is none. */
+export const applyLanguage = (preferred: Language | null) =>
+  i18n.changeLanguage(initialLanguage(preferred, navigator.languages));

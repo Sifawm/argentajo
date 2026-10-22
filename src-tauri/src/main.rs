@@ -6,6 +6,7 @@ use argentajo_core::nest::{Job, JobItem, Layout, Paper, Quantity, nest};
 use argentajo_core::output::{OutputOptions, export_pdf, render_page};
 use argentajo_core::piece::{Piece, PrepareOptions, prepare_piece, split_piece};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -545,31 +546,54 @@ fn open_job_file(
     }))
 }
 
-/// "My sheets": the Sheet sizes saved for reuse, width × height in mm, in a JSON file in app data.
-fn my_sheets_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+/// A JSON file in app data.
+fn data_file(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String> {
     Ok(app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
-        .join("my-sheets.json"))
+        .join(name))
 }
 
-/// None saved yet reads as none.
-#[tauri::command(async)]
-fn load_my_sheets(app: tauri::AppHandle) -> Result<Vec<[f64; 2]>, String> {
-    match fs::read(my_sheets_file(&app)?) {
+/// None if it was never written.
+fn read_data<T: DeserializeOwned>(file: PathBuf) -> Result<Option<T>, String> {
+    match fs::read(file) {
         Ok(json) => serde_json::from_slice(&json).map_err(|e| e.to_string()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Replaces it whole: written aside and renamed, so a crash never leaves it half-written.
+fn write_data(file: PathBuf, data: &impl Serialize) -> Result<(), String> {
+    fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
+    let temp = file.with_extension("json.tmp");
+    fs::write(&temp, serde_json::to_vec_pretty(data).unwrap()).map_err(|e| e.to_string())?;
+    fs::rename(temp, file).map_err(|e| e.to_string())
+}
+
+/// "My sheets": the Sheet sizes saved for reuse, width × height in mm. None saved yet reads as none.
+#[tauri::command(async)]
+fn load_my_sheets(app: tauri::AppHandle) -> Result<Vec<[f64; 2]>, String> {
+    Ok(read_data(data_file(&app, "my-sheets.json")?)?.unwrap_or_default())
 }
 
 /// Replaces the saved sizes.
 #[tauri::command(async)]
 fn save_my_sheets(app: tauri::AppHandle, sheets: Vec<[f64; 2]>) -> Result<(), String> {
-    let file = my_sheets_file(&app)?;
-    fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
-    fs::write(file, serde_json::to_vec_pretty(&sheets).unwrap()).map_err(|e| e.to_string())
+    write_data(data_file(&app, "my-sheets.json")?, &sheets)
+}
+
+/// The frontend's preferences, as it saved them (it checks them); null before the first save.
+#[tauri::command(async)]
+fn load_preferences(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+    read_data(data_file(&app, "preferences.json")?)
+}
+
+/// Replaces the saved preferences.
+#[tauri::command(async)]
+fn save_preferences(app: tauri::AppHandle, preferences: serde_json::Value) -> Result<(), String> {
+    write_data(data_file(&app, "preferences.json")?, &preferences)
 }
 
 /// Ends the latest nesting run, which then returns the best Layout so far.
@@ -607,7 +631,9 @@ fn main() {
             save_job_file,
             open_job_file,
             load_my_sheets,
-            save_my_sheets
+            save_my_sheets,
+            load_preferences,
+            save_preferences
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

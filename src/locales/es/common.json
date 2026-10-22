@@ -1,10 +1,20 @@
 {
   "tagline": "Encaje por contorno de plantillas de joyería en láminas de plata",
   "coreVersion": "Versión del núcleo: {{version}}",
-  "language": "Idioma",
   "views": {
     "label": "Vistas",
     "library": "Biblioteca",
     "job": "Trabajo"
+  },
+  "size": "{{w, number}} × {{h, number}} {{symbol}}",
+  "preferences": {
+    "title": "Preferencias",
+    "unit": "Unidades",
+    "unitHint": "Las medidas se guardan en mm; los px son 96 por pulgada.",
+    "language": "Idioma",
+    "job": "Trabajos nuevos",
+    "jobHint": "Valores de cada trabajo nuevo. Los trabajos ya abiertos conservan los suyos.",
+    "saveFailed": "No se pudieron guardar las preferencias: {{error}}",
+    "close": "Cerrar"
   }
 }
