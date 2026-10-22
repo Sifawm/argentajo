@@ -1,10 +1,27 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/** A named real Size of a Piece: a side in mm, the other follows the proportions. */
+export interface Size {
+  id: string;
+  name: string;
+  measure: { width: number } | { height: number };
+}
+
+/** A Size as it arrives in preparation options; the first one may omit its measure. */
+export interface SizeInput {
+  id: string;
+  name: string;
+  measure?: { width: number } | { height: number };
+}
+
+/** Well-known id for the backward-compatible Normal size. */
+export const NORMAL_SIZE_ID = "normal";
+
 /** Mirrors `core::piece::PrepareOptions`. Sizes are in mm. */
 export interface PrepareOptions {
   tolerance: number;
-  /** `null` takes it from the file's resolution (DPI), or 20 mm wide without one. */
-  size: { width: number } | { height: number } | null;
+  /** The Piece's named Sizes. The first is the Default size; a missing measure is derived from DPI. */
+  sizes: SizeInput[];
   allowRotation: boolean;
   allowMirror: boolean;
 }
@@ -27,6 +44,8 @@ export interface PieceView {
   contours: [number, number][][];
   allowRotation: boolean;
   allowMirror: boolean;
+  /** Ordered, non-empty list of named Sizes. The first is the Default size. */
+  sizes: Size[];
 }
 
 /** Manual brush/eraser edits: a PNG the size of the source image, read by `core` (`PrepareOptions::edits`). */
@@ -69,7 +88,7 @@ export const updatePiece = (
   edits?: Edits,
 ) => prepare("update_piece", image, options, edits, { id, type });
 
-/** One Library piece per Part, all at the scale `options.size` gives the whole image. */
+/** One Library piece per Part, all at the scale the first Size in `options.sizes` gives. */
 export const splitToLibrary = (image: Uint8Array, options: PrepareOptions, edits?: Edits) =>
   prepare<PieceView[]>("split_to_library", image, options, edits);
 
