@@ -12,6 +12,7 @@
   "defaultSize": "Tamaño por defecto",
   "makeDefault": "Hacer predeterminado",
   "deleteSize": "Eliminar tamaño",
+  "dragSize": "Arrastrar para reordenar",
   "sizeName": "Nombre",
   "duplicateSizeName": "Este nombre ya se usa en otro tamaño.",
   "duplicateSizeId": "Este identificador ya se usa en otro tamaño.",

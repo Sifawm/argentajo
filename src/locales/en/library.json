@@ -12,6 +12,7 @@
   "defaultSize": "Default size",
   "makeDefault": "Make default",
   "deleteSize": "Delete size",
+  "dragSize": "Drag to reorder",
   "sizeName": "Name",
   "duplicateSizeName": "This name is already used for another size.",
   "duplicateSizeId": "This id is already used for another size.",

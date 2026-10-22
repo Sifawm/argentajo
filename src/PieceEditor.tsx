@@ -1,8 +1,8 @@
 import {
-  ArrowDown,
-  ArrowUp,
+  Bookmark,
   Brush,
   Eraser,
+  GripVertical,
   Maximize,
   Redo2,
   Trash2,
@@ -22,6 +22,21 @@ import {
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
+import {
+  DndContext,
+  type DragEndEvent,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import {
   addToLibrary,
   type Edits,
@@ -676,23 +691,15 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     });
   };
 
-  const moveUp = (id: string) => {
-    setSizes((sizes) => {
-      const index = sizes.findIndex((s) => s.id === id);
-      if (index <= 0) return sizes;
-      const next = [...sizes];
-      [next[index - 1], next[index]] = [next[index], next[index - 1]];
-      return next;
-    });
-  };
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
-  const moveDown = (id: string) => {
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
     setSizes((sizes) => {
-      const index = sizes.findIndex((s) => s.id === id);
-      if (index < 0 || index >= sizes.length - 1) return sizes;
-      const next = [...sizes];
-      [next[index], next[index + 1]] = [next[index + 1], next[index]];
-      return next;
+      const oldIndex = sizes.findIndex((s) => s.id === active.id);
+      const newIndex = sizes.findIndex((s) => s.id === over.id);
+      return arrayMove(sizes, oldIndex, newIndex);
     });
   };
 
@@ -728,6 +735,122 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
 
   const cursorOverlayVisible = !isPanning && cursorVisible && !!tool;
   const hasErrors = Object.keys(validationErrors).length > 0;
+
+  const SortableSizeItem = ({
+    size,
+    selected,
+    isDefault,
+  }: {
+    size: EditorSize;
+    selected: boolean;
+    isDefault: boolean;
+  }) => {
+    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+      id: size.id,
+    });
+    const style = { transform: CSS.Transform.toString(transform), transition };
+
+    return (
+      <div
+        ref={setNodeRef}
+        style={style}
+        className={`group flex items-start gap-2 rounded-md border border-zinc-200 p-2 transition-colors ${
+          selected ? "border-l-2 border-l-zinc-900 bg-zinc-50" : ""
+        } ${isDragging ? "opacity-50" : ""}`}
+      >
+        <button
+          type="button"
+          {...attributes}
+          {...listeners}
+          aria-label={t("dragSize")}
+          title={t("dragSize")}
+          className="mt-1 shrink-0 cursor-grab text-zinc-400 hover:text-zinc-700 active:cursor-grabbing"
+        >
+          <GripVertical aria-hidden className="size-5" />
+        </button>
+        <input
+          type="radio"
+          name="selectedSize"
+          checked={selected}
+          onChange={() => setSelectedSizeId(size.id)}
+          aria-label={t("size")}
+          className="mt-2 shrink-0"
+        />
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => makeDefault(size.id)}
+              disabled={isDefault}
+              aria-label={isDefault ? t("defaultSize") : t("makeDefault")}
+              title={isDefault ? t("defaultSize") : t("makeDefault")}
+              className={`shrink-0 rounded-md p-1 ${
+                isDefault ? "text-amber-500" : "text-zinc-400 hover:text-zinc-700"
+              }`}
+            >
+              <Bookmark aria-hidden className="size-4" fill={isDefault ? "currentColor" : "none"} />
+            </button>
+            <input
+              type="text"
+              value={size.name}
+              onChange={(e) => updateSize(size.id, { name: e.target.value })}
+              aria-label={t("sizeName")}
+              className="min-w-0 flex-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex shrink-0 overflow-hidden rounded-md border border-zinc-300">
+              <button
+                type="button"
+                title={t("width", { unit })}
+                onClick={() => updateSize(size.id, { side: "width" })}
+                className={`px-2 py-1 text-xs ${
+                  size.side === "width" ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-100"
+                }`}
+              >
+                ↔
+              </button>
+              <button
+                type="button"
+                title={t("height", { unit })}
+                onClick={() => updateSize(size.id, { side: "height" })}
+                className={`px-2 py-1 text-xs ${
+                  size.side === "height" ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-100"
+                }`}
+              >
+                ↕
+              </button>
+            </div>
+            <input
+              type="number"
+              min="0"
+              step="0.1"
+              value={size.text}
+              onChange={(e) => updateSize(size.id, { text: e.target.value })}
+              aria-label={t(size.side, { unit })}
+              className="w-24 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+            />
+          </div>
+          {validationErrors[size.id] && (
+            <p className="text-xs text-red-700">{validationErrors[size.id]}</p>
+          )}
+        </div>
+        <div className="flex w-8 shrink-0 items-center justify-center self-stretch">
+          {sizes.length > 1 && (
+            <button
+              type="button"
+              onClick={() => deleteSize(size.id)}
+              aria-label={t("deleteSize")}
+              title={t("deleteSize")}
+              className="rounded-md p-1.5 text-zinc-400 opacity-0 transition-opacity duration-150 hover:text-red-700 group-hover:opacity-100"
+            >
+              <Trash2 aria-hidden className="size-4" />
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
@@ -872,107 +995,27 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
 
               <div className="flex flex-col gap-2">
                 <span className="text-sm">{t("sizes")}</span>
-                <div className="flex max-h-56 flex-col gap-2 overflow-y-auto">
-                  {sizes.map((size, index) => {
-                    const selected = size.id === selectedSizeId;
-                    return (
-                      <div
-                        key={size.id}
-                        className={`flex flex-col gap-1 rounded-md border p-2 ${selected ? "border-zinc-900 bg-zinc-50" : "border-zinc-200"}`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="radio"
-                            name="selectedSize"
-                            checked={selected}
-                            onChange={() => setSelectedSizeId(size.id)}
-                            aria-label={t("size")}
-                            className="shrink-0"
-                          />
-                          <input
-                            type="text"
-                            value={size.name}
-                            onChange={(e) => updateSize(size.id, { name: e.target.value })}
-                            aria-label={t("sizeName")}
-                            className="min-w-0 flex-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
-                          />
-                          <div className="flex shrink-0 overflow-hidden rounded-md border border-zinc-300">
-                            <button
-                              type="button"
-                              title={t("width", { unit })}
-                              onClick={() => updateSize(size.id, { side: "width" })}
-                              className={`px-2 py-1 text-xs ${size.side === "width" ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-100"}`}
-                            >
-                              ↔
-                            </button>
-                            <button
-                              type="button"
-                              title={t("height", { unit })}
-                              onClick={() => updateSize(size.id, { side: "height" })}
-                              className={`px-2 py-1 text-xs ${size.side === "height" ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-100"}`}
-                            >
-                              ↕
-                            </button>
-                          </div>
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.1"
-                            value={size.text}
-                            onChange={(e) => updateSize(size.id, { text: e.target.value })}
-                            aria-label={t(size.side, { unit })}
-                            className="w-20 rounded-md border border-zinc-300 px-2 py-1 text-sm"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => makeDefault(size.id)}
-                            disabled={index === 0}
-                            title={t("makeDefault")}
-                            className="shrink-0 rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-100 disabled:opacity-40"
-                          >
-                            {t("makeDefault")}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => moveUp(size.id)}
-                            disabled={index === 0}
-                            aria-label={t("moveUp")}
-                            title={t("moveUp")}
-                            className="shrink-0 rounded-md border border-zinc-300 p-1.5 text-zinc-600 hover:bg-zinc-100 disabled:opacity-40"
-                          >
-                            <ArrowUp aria-hidden className="size-4" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => moveDown(size.id)}
-                            disabled={index === sizes.length - 1}
-                            aria-label={t("moveDown")}
-                            title={t("moveDown")}
-                            className="shrink-0 rounded-md border border-zinc-300 p-1.5 text-zinc-600 hover:bg-zinc-100 disabled:opacity-40"
-                          >
-                            <ArrowDown aria-hidden className="size-4" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => deleteSize(size.id)}
-                            disabled={sizes.length <= 1}
-                            aria-label={t("deleteSize")}
-                            title={t("deleteSize")}
-                            className="shrink-0 rounded-md border border-zinc-300 p-1.5 text-zinc-600 hover:text-red-700 disabled:opacity-40"
-                          >
-                            <Trash2 aria-hidden className="size-4" />
-                          </button>
-                        </div>
-                        {validationErrors[size.id] && (
-                          <p className="text-xs text-red-700">{validationErrors[size.id]}</p>
-                        )}
-                        {index === 0 && (
-                          <span className="text-xs text-zinc-500">{t("defaultSize")}</span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCenter}
+                  onDragEnd={handleDragEnd}
+                >
+                  <SortableContext
+                    items={sizes.map((s) => s.id)}
+                    strategy={verticalListSortingStrategy}
+                  >
+                    <div className="flex max-h-56 flex-col gap-2 overflow-y-auto">
+                      {sizes.map((size, index) => (
+                        <SortableSizeItem
+                          key={size.id}
+                          size={size}
+                          selected={size.id === selectedSizeId}
+                          isDefault={index === 0}
+                        />
+                      ))}
+                    </div>
+                  </SortableContext>
+                </DndContext>
                 <button
                   type="button"
                   onClick={addSize}
