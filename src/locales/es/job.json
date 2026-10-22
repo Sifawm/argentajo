@@ -59,5 +59,9 @@
   "exportFailed": "No se pudo exportar el PDF: {{error}}",
   "exported": "PDF guardado",
   "printAtActualSize": "Imprímelo al 100 % (tamaño real): nunca «ajustar a la página» ni otra escala. Después comprueba con una regla que el cuadrado negro mide exactamente 1 × 1 cm.",
-  "ok": "Aceptar"
+  "ok": "Aceptar",
+  "openJob": "Abrir trabajo",
+  "saveJob": "Guardar trabajo",
+  "openFailed": "No se pudo abrir el trabajo: {{error}}",
+  "saveFailed": "No se pudo guardar el trabajo: {{error}}"
 }

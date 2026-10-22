@@ -16,6 +16,8 @@ pdf-writer = "0.12"
 rand = "0.10"
 resvg = "0.48"
 serde = { version = "1", features = ["derive"] }
+# Parsed back to the very f64s written, so an opened Layout is the one saved.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sparrow = { git = "https://github.com/JeroenGar/sparrow", rev = "1fe3e3146110c34d77510636defb737c7ce893c6" }
 # Its own usvg (0.45) parses the pages for the PDF; no text is ever drawn.
 svg2pdf = { version = "0.13", default-features = false, features = ["image"] }

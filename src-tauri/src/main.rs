@@ -1,11 +1,13 @@
 // Prevents an additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use argentajo_core::job_file::{SavedJob, open_job, save_job};
 use argentajo_core::nest::{Job, JobItem, Layout, Paper, Quantity, nest};
 use argentajo_core::output::{OutputOptions, export_pdf, render_page};
 use argentajo_core::piece::{Piece, PrepareOptions, prepare_piece, split_piece};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -253,8 +255,9 @@ fn list_library(app: tauri::AppHandle) -> Result<Vec<PieceView>, String> {
     Ok(pieces)
 }
 
-/// A Job as the frontend sends it: Library piece ids with their quantities.
-#[derive(Deserialize)]
+/// A Job as the frontend sends it: piece ids with their quantities. An id is a Library piece's, or
+/// a Job piece's.
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JobRequest {
     paper: Paper,
@@ -265,10 +268,48 @@ struct JobRequest {
     items: Vec<ItemRequest>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct ItemRequest {
     id: String,
     quantity: Quantity,
+}
+
+/// The Pieces of the Job file opened last, by their `job-<index>` id: the copies saved with it,
+/// whatever has happened to the Library since.
+#[derive(Default)]
+struct JobPieces(Mutex<HashMap<String, Piece>>);
+
+/// The id of the Job file's `index`th item's Piece.
+fn job_piece_id(index: usize) -> String {
+    format!("job-{index}")
+}
+
+/// The Job the request describes, with each item's Piece read from the Job pieces or the Library.
+fn resolve(app: &tauri::AppHandle, job: JobRequest) -> Result<Job, String> {
+    let job_pieces = app.state::<JobPieces>();
+    let job_pieces = job_pieces.0.lock().unwrap();
+    let items = job
+        .items
+        .into_iter()
+        .map(|item| {
+            let piece = match job_pieces.get(&item.id) {
+                Some(piece) => piece.clone(),
+                None => read_piece(&piece_dir(app, &item.id)?)?,
+            };
+            Ok(JobItem {
+                piece,
+                quantity: item.quantity,
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(Job {
+        paper: job.paper,
+        sheets_mm: job.sheets_mm,
+        separation_mm: job.separation_mm,
+        edge_margin_mm: job.edge_margin_mm,
+        time_limit: Duration::try_from_secs_f64(job.time_limit_s).map_err(|e| e.to_string())?,
+        items,
+    })
 }
 
 /// The Layout with each of its pages rendered.
@@ -288,6 +329,16 @@ fn render_pages(job: &Job, layout: &Layout, options: &OutputOptions) -> Vec<Stri
 /// The cancellation token of the latest nesting run.
 #[derive(Default)]
 struct Nesting(Mutex<Arc<AtomicBool>>);
+
+impl Nesting {
+    /// Stops the run in progress and returns the token of the next one.
+    fn restart(&self) -> Arc<AtomicBool> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let previous = std::mem::replace(&mut *self.0.lock().unwrap(), cancel.clone());
+        previous.store(true, Ordering::Relaxed);
+        cancel
+    }
+}
 
 /// What gets printed: the latest run's latest Layout, with its Job, and the options it's rendered
 /// with.
@@ -311,27 +362,8 @@ fn nest_job(
     on_progress: Channel<NestView>,
     on_iterations: Channel<u64>,
 ) -> Result<NestView, String> {
-    let items = job
-        .items
-        .into_iter()
-        .map(|item| {
-            Ok(JobItem {
-                piece: read_piece(&piece_dir(&app, &item.id)?)?,
-                quantity: item.quantity,
-            })
-        })
-        .collect::<Result<_, String>>()?;
-    let job = Arc::new(Job {
-        paper: job.paper,
-        sheets_mm: job.sheets_mm,
-        separation_mm: job.separation_mm,
-        edge_margin_mm: job.edge_margin_mm,
-        time_limit: Duration::try_from_secs_f64(job.time_limit_s).map_err(|e| e.to_string())?,
-        items,
-    });
-    let cancel = Arc::new(AtomicBool::new(false));
-    let previous = std::mem::replace(&mut *nesting.0.lock().unwrap(), cancel.clone());
-    previous.store(true, Ordering::Relaxed);
+    let job = Arc::new(resolve(&app, job)?);
+    let cancel = nesting.restart();
     output.lock().unwrap().options = options;
     // Kept for printing, unless a newer run has started.
     let keep = |layout: Layout| {
@@ -405,6 +437,114 @@ fn export_job_pdf(app: tauri::AppHandle, output: State<Mutex<Output>>) -> Result
     Ok(true)
 }
 
+/// Asks where to save the Job the request describes, and saves it there with the output options and
+/// the latest Layout, unless that was nested for other settings. False if the jeweller cancels.
+#[tauri::command(async)]
+fn save_job_file(
+    app: tauri::AppHandle,
+    output: State<Mutex<Output>>,
+    job: JobRequest,
+) -> Result<bool, String> {
+    let job = resolve(&app, job)?;
+    let saved = {
+        let output = output.lock().unwrap();
+        let layout = output
+            .latest
+            .as_ref()
+            .and_then(|(nested, layout)| nested.nests_like(&job).then(|| layout.clone()));
+        SavedJob {
+            job,
+            layout,
+            output: output.options,
+        }
+    };
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("Argentajo", &["json"])
+        .set_file_name("argentajo.json")
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    fs::write(
+        path.into_path().map_err(|e| e.to_string())?,
+        save_job(&saved),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// A Job file as the frontend reopens it: the request that nests it again, its Pieces by their Job
+/// piece ids, the output options and the Layout saved with it, rendered with them.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenedJob {
+    job: JobRequest,
+    pieces: Vec<PieceView>,
+    output: OutputOptions,
+    result: Option<NestView>,
+}
+
+/// Asks for a Job file and opens it, stopping any nesting run: its Layout becomes the latest, as if
+/// just nested, and its Pieces the Job pieces. None if the jeweller cancels. A file that isn't a
+/// Job changes nothing.
+#[tauri::command(async)]
+fn open_job_file(
+    app: tauri::AppHandle,
+    nesting: State<Nesting>,
+    output: State<Mutex<Output>>,
+    job_pieces: State<JobPieces>,
+) -> Result<Option<OpenedJob>, String> {
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("Argentajo", &["json"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let json = fs::read(path.into_path().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let SavedJob {
+        job,
+        layout,
+        output: options,
+    } = open_job(&json).map_err(|e| e.to_string())?;
+    nesting.restart();
+    let (mut items, mut pieces, mut by_id) = (vec![], vec![], HashMap::new());
+    for (i, item) in job.items.iter().enumerate() {
+        let id = job_piece_id(i);
+        items.push(ItemRequest {
+            id: id.clone(),
+            quantity: item.quantity,
+        });
+        pieces.push(PieceView::new(Some(id.clone()), item.piece.clone()));
+        by_id.insert(id, item.piece.clone());
+    }
+    *job_pieces.0.lock().unwrap() = by_id;
+    let request = JobRequest {
+        paper: job.paper,
+        sheets_mm: job.sheets_mm.clone(),
+        separation_mm: job.separation_mm,
+        edge_margin_mm: job.edge_margin_mm,
+        time_limit_s: job.time_limit.as_secs_f64(),
+        items,
+    };
+    let result = layout.as_ref().map(|layout| NestView {
+        pages: render_pages(&job, layout, &options),
+        layout: layout.clone(),
+    });
+    let mut output = output.lock().unwrap();
+    output.options = options;
+    output.latest = layout.map(|layout| (Arc::new(job), layout));
+    Ok(Some(OpenedJob {
+        job: request,
+        pieces,
+        output: options,
+        result,
+    }))
+}
+
 /// "My sheets": the Sheet sizes saved for reuse, width × height in mm, in a JSON file in app data.
 fn my_sheets_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app
@@ -450,6 +590,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Nesting::default())
         .manage(Mutex::new(Output::default()))
+        .manage(JobPieces::default())
         .invoke_handler(tauri::generate_handler![
             core_version,
             preview_piece,
@@ -463,6 +604,8 @@ fn main() {
             stop_nesting,
             set_output_options,
             export_job_pdf,
+            save_job_file,
+            open_job_file,
             load_my_sheets,
             save_my_sheets
         ])

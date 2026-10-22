@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { PieceView } from "./library";
 
 /** Width × height in mm. */
 export type Size = [number, number];
@@ -21,9 +22,76 @@ export interface JobRequest {
   edgeMarginMm: number;
   /** Bound on the nesting run, in seconds. */
   timeLimitS: number;
-  /** Library piece ids with a fixed quantity, or "fill" for as many as fit in the silver left. */
+  /**
+   * Piece ids, of the Library or of the Job file opened last, with a fixed quantity, or "fill" for
+   * as many as fit in the silver left.
+   */
   items: { id: string; quantity: { fixed: number } | "fill" }[];
 }
+
+export type PaperName = keyof typeof PAPERS | "custom";
+/** The quantity is kept while the item is on fill, for when it's switched back. */
+export type Item = { id: string; quantity: number; fill: boolean };
+
+/** A Job as it's edited. Sizes in mm, the time limit in seconds. */
+export interface JobSettings {
+  paper: PaperName;
+  /** Either way round: the orientation decides. */
+  customPaper: Size;
+  landscape: boolean;
+  printerMargin: number;
+  sheets: Size[];
+  separation: number;
+  edgeMargin: number;
+  timeLimit: number;
+  items: Item[];
+}
+
+/** What `nest_job` and `saveJob` take: the paper oriented, quantities as `core` has them. */
+export const toJobRequest = (settings: JobSettings): JobRequest => {
+  const { paper, customPaper, landscape } = settings;
+  const [shortSide, longSide] = [...(paper === "custom" ? customPaper : PAPERS[paper])].sort(
+    (a, b) => a - b,
+  );
+  return {
+    paper: {
+      sizeMm: landscape ? [longSide, shortSide] : [shortSide, longSide],
+      marginMm: settings.printerMargin,
+    },
+    sheetsMm: settings.sheets,
+    separationMm: settings.separation,
+    edgeMarginMm: settings.edgeMargin,
+    timeLimitS: settings.timeLimit,
+    items: settings.items.map(({ id, quantity, fill }) => ({
+      id,
+      quantity: fill ? "fill" : { fixed: quantity },
+    })),
+  };
+};
+
+/** The settings `toJobRequest` makes `job` from, such as a reopened Job file's. */
+export const fromJobRequest = (job: JobRequest): JobSettings => {
+  const [w, h] = job.paper.sizeMm;
+  const sides: Size = [Math.min(w, h), Math.max(w, h)];
+  const preset = (Object.keys(PAPERS) as (keyof typeof PAPERS)[]).find((name) =>
+    PAPERS[name].every((side, i) => side === sides[i]),
+  );
+  return {
+    paper: preset ?? "custom",
+    customPaper: sides,
+    landscape: w > h,
+    printerMargin: job.paper.marginMm,
+    sheets: job.sheetsMm,
+    separation: job.separationMm,
+    edgeMargin: job.edgeMarginMm,
+    timeLimit: job.timeLimitS,
+    items: job.items.map(({ id, quantity }) =>
+      quantity === "fill"
+        ? { id, quantity: 1, fill: true }
+        : { id, quantity: quantity.fixed, fill: false },
+    ),
+  };
+};
 
 /** Mirrors `core::output::OutputOptions`: what's printed besides the pieces and the 1 cm square. */
 export interface OutputOptions {
@@ -76,6 +144,24 @@ export const setOutputOptions = (options: OutputOptions) =>
 
 /** Asks where to save the latest Layout as a PDF and saves it there. False if cancelled. */
 export const exportPdf = () => invoke<boolean>("export_job_pdf");
+
+/**
+ * Asks where to save the Job, and saves it there with its own copy of its pieces, the output options
+ * and the latest Layout, unless that was calculated for other settings. False if cancelled.
+ */
+export const saveJob = (job: JobRequest) => invoke<boolean>("save_job_file", { job });
+
+/** A Job file as reopened: `job` refers to `pieces`, the copies saved with it, by their ids. */
+export interface OpenedJob {
+  job: JobRequest;
+  pieces: PieceView[];
+  output: OutputOptions;
+  /** The Layout saved with it, rendered with `output`, if any. */
+  result: NestView | null;
+}
+
+/** Asks for a Job file and opens it, stopping any run. Null if cancelled; rejects a bad file. */
+export const openJob = () => invoke<OpenedJob | null>("open_job_file");
 
 /** "My sheets": Sheet sizes saved for reuse, width × height in mm. */
 export const loadMySheets = () => invoke<Size[]>("load_my_sheets");

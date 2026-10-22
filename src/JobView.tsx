@@ -2,9 +2,11 @@ import {
   Bookmark,
   CircleStop,
   FileDown,
+  FolderOpen,
   Play,
   Plus,
   RefreshCw,
+  Save,
   TriangleAlert,
   X,
 } from "lucide-react";
@@ -14,22 +16,24 @@ import { useTranslation } from "react-i18next";
 import {
   DEFAULT_OUTPUT,
   exportPdf,
+  fromJobRequest,
+  type Item,
   type JobRequest,
   loadMySheets,
   type NestView,
   nestJob,
+  openJob,
   type OutputOptions,
   PAPERS,
+  type PaperName,
+  saveJob,
   saveMySheets,
   setOutputOptions,
   type Size,
   stopNesting,
+  toJobRequest,
 } from "./job";
 import type { PieceView } from "./library";
-
-type PaperName = keyof typeof PAPERS | "custom";
-/** The quantity is kept while the item is on fill, for when it's switched back. */
-type Item = { id: string; quantity: number; fill: boolean };
 
 /** What Library thumbnails carry when dragged into the Job. */
 const DRAG_TYPE = "application/x-argentajo-piece";
@@ -51,6 +55,8 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
   const [edgeMargin, setEdgeMargin] = useState(1.5);
   const [timeLimit, setTimeLimit] = useState(60);
   const [items, setItems] = useState<Item[]>([]);
+  // The copies of its pieces the Job file opened last holds, untouched by the Library.
+  const [jobPieces, setJobPieces] = useState<PieceView[]>([]);
   // With the request it was calculated for: `placed` and `missing` follow its items.
   const [result, setResult] = useState<{ view: NestView; job: JobRequest }>();
   const [pageUrls, setPageUrls] = useState<string[]>([]);
@@ -65,27 +71,24 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
   // Counts runs, so a superseded one's late progress is ignored.
   const run = useRef(0);
 
-  const byId = useMemo(() => new Map(pieces.map((piece) => [piece.id, piece])), [pieces]);
+  const byId = useMemo(
+    () => new Map([...pieces, ...jobPieces].map((piece) => [piece.id, piece])),
+    [pieces, jobPieces],
+  );
   // Pieces deleted from the Library drop out of the Job.
   const jobItems = items.filter((item) => byId.has(item.id));
 
-  const [shortSide, longSide] = [...(paper === "custom" ? customPaper : PAPERS[paper])].sort(
-    (a, b) => a - b,
-  );
-  const job: JobRequest = {
-    paper: {
-      sizeMm: landscape ? [longSide, shortSide] : [shortSide, longSide],
-      marginMm: printerMargin,
-    },
-    sheetsMm: sheets,
-    separationMm: separation,
-    edgeMarginMm: edgeMargin,
-    timeLimitS: timeLimit,
-    items: jobItems.map(({ id, quantity, fill }) => ({
-      id,
-      quantity: fill ? "fill" : { fixed: quantity },
-    })),
-  };
+  const job = toJobRequest({
+    paper,
+    customPaper,
+    landscape,
+    printerMargin,
+    sheets,
+    separation,
+    edgeMargin,
+    timeLimit,
+    items: jobItems,
+  });
   const valid =
     sheets.length > 0 &&
     [...job.paper.sizeMm, ...sheets.flat()].every(isPositive) &&
@@ -181,6 +184,33 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     );
   };
 
+  const saveFile = () => saveJob(job).catch((e) => setError(t("saveFailed", { error: String(e) })));
+
+  // Replaces the Job, and any run in progress, only once the file has opened.
+  const openFile = () =>
+    openJob().then(
+      (opened) => {
+        if (!opened) return;
+        run.current++;
+        setCalculating(false);
+        setError(undefined);
+        const settings = fromJobRequest(opened.job);
+        setPaper(settings.paper);
+        setCustomPaper(settings.customPaper);
+        setLandscape(settings.landscape);
+        setPrinterMargin(settings.printerMargin);
+        setSheets(settings.sheets);
+        setSeparation(settings.separation);
+        setEdgeMargin(settings.edgeMargin);
+        setTimeLimit(settings.timeLimit);
+        setItems(settings.items);
+        setJobPieces(opened.pieces);
+        setOutput(opened.output);
+        setResult(opened.result ? { view: opened.result, job: opened.job } : undefined);
+      },
+      (e) => setError(t("openFailed", { error: String(e) })),
+    );
+
   const exportResult = () =>
     exportPdf().then(setExported, (e) => setError(t("exportFailed", { error: String(e) })));
 
@@ -237,6 +267,25 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
   return (
     <section className="flex min-h-0 flex-1 gap-6">
       <div className="flex w-80 shrink-0 flex-col gap-5 overflow-y-auto pr-2">
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => void openFile()}
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+          >
+            <FolderOpen aria-hidden className="size-4" />
+            {t("openJob")}
+          </button>
+          <button
+            type="button"
+            disabled={!valid || calculating}
+            onClick={() => void saveFile()}
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-sm disabled:opacity-40"
+          >
+            <Save aria-hidden className="size-4" />
+            {t("saveJob")}
+          </button>
+        </div>
         <Group title={t("paper")}>
           <label className="flex flex-col gap-1 text-sm">
             {t("paperSize")}

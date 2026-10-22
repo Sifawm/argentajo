@@ -1,5 +1,6 @@
 //! Argentajo domain logic. No Tauri dependency: everything here is testable with `cargo test`.
 
+pub mod job_file;
 pub mod nest;
 pub mod output;
 pub mod piece;

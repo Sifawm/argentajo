@@ -40,7 +40,8 @@ pub struct Paper {
     pub margin_mm: f64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Job {
     pub paper: Paper,
     /// The silver Sheets, width × height in mm as each lies on the paper, in the order they're filled.
@@ -54,13 +55,25 @@ pub struct Job {
     pub items: Vec<JobItem>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+impl Job {
+    /// Whether a Layout nested for this Job is one for `other` too: the time limit doesn't change it.
+    pub fn nests_like(&self, other: &Job) -> bool {
+        *self
+            == Job {
+                time_limit: self.time_limit,
+                ..other.clone()
+            }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct JobItem {
+    #[serde(with = "crate::job_file::embedded")]
     pub piece: Piece,
     pub quantity: Quantity,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Quantity {
     /// This many copies, or as many as fit, the rest missing.
@@ -80,7 +93,7 @@ impl Quantity {
 }
 
 /// The nesting result.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Layout {
     /// One per Job Sheet.
@@ -102,9 +115,26 @@ impl Layout {
             .max()
             .unwrap_or(0)
     }
+
+    /// Whether it can be a Layout of `job`, as `nest` makes them: one per Sheet, no more pages than
+    /// Sheets, a count per item, and every Placement a Part of an item.
+    pub fn fits(&self, job: &Job) -> bool {
+        let items = &job.items;
+        self.sheets.len() == job.sheets_mm.len()
+            && self.placed.len() == items.len()
+            && self.missing.len() == items.len()
+            && self.sheets.iter().all(|sheet| {
+                sheet.page < self.sheets.len()
+                    && sheet.placements.iter().all(|p| {
+                        items
+                            .get(p.item)
+                            .is_some_and(|i| p.part < i.piece.contours.len())
+                    })
+            })
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetLayout {
     /// Index of the page it's on.
@@ -115,7 +145,7 @@ pub struct SheetLayout {
     pub placements: Vec<Placement>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Placement {
     /// Index into `Job::items`.
     pub item: usize,

@@ -132,6 +132,7 @@ dependencies = [
  "rand",
  "resvg",
  "serde",
+ "serde_json",
  "sparrow",
  "svg2pdf",
 ]
