@@ -4,7 +4,7 @@
 use argentajo_core::job_file::{SavedJob, open_job, save_job};
 use argentajo_core::nest::{Job, JobItem, Layout, Paper, Quantity, nest};
 use argentajo_core::output::{OutputOptions, export_pdf, render_page};
-use argentajo_core::piece::{Piece, PrepareOptions, prepare_piece, split_piece};
+use argentajo_core::piece::{Piece, PrepareOptions, piece_at_size, prepare_piece, split_piece};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -272,7 +272,10 @@ struct JobRequest {
 #[derive(Serialize, Deserialize)]
 struct ItemRequest {
     id: String,
+    size_id: String,
     quantity: Quantity,
+    #[serde(default)]
+    fixed: bool,
 }
 
 /// The Pieces of the Job file opened last, by their `job-<index>` id: the copies saved with it,
@@ -285,7 +288,8 @@ fn job_piece_id(index: usize) -> String {
     format!("job-{index}")
 }
 
-/// The Job the request describes, with each item's Piece read from the Job pieces or the Library.
+/// The Job the request describes, with each item's Piece read from the Job pieces or the Library
+/// and scaled to the requested Size.
 fn resolve(app: &tauri::AppHandle, job: JobRequest) -> Result<Job, String> {
     let job_pieces = app.state::<JobPieces>();
     let job_pieces = job_pieces.0.lock().unwrap();
@@ -297,8 +301,11 @@ fn resolve(app: &tauri::AppHandle, job: JobRequest) -> Result<Job, String> {
                 Some(piece) => piece.clone(),
                 None => read_piece(&piece_dir(app, &item.id)?)?,
             };
+            let piece = piece_at_size(&piece, &item.size_id)
+                .ok_or_else(|| format!("unknown size {} for piece {}", item.size_id, item.id))?;
             Ok(JobItem {
                 piece,
+                size_id: item.size_id,
                 quantity: item.quantity,
             })
         })
@@ -446,7 +453,10 @@ fn save_job_file(
     output: State<Mutex<Output>>,
     job: JobRequest,
 ) -> Result<bool, String> {
-    let job = resolve(&app, job)?;
+    let mut job = resolve(&app, job)?;
+    for item in &mut job.items {
+        item.piece = piece_at_size(&item.piece, &item.size_id).unwrap_or_else(|| item.piece.clone());
+    }
     let saved = {
         let output = output.lock().unwrap();
         let layout = output
@@ -515,12 +525,15 @@ fn open_job_file(
     let (mut items, mut pieces, mut by_id) = (vec![], vec![], HashMap::new());
     for (i, item) in job.items.iter().enumerate() {
         let id = job_piece_id(i);
+        let piece = piece_at_size(&item.piece, &item.size_id).unwrap_or_else(|| item.piece.clone());
         items.push(ItemRequest {
             id: id.clone(),
+            size_id: item.size_id.clone(),
             quantity: item.quantity,
+            fixed: true,
         });
-        pieces.push(PieceView::new(Some(id.clone()), item.piece.clone()));
-        by_id.insert(id, item.piece.clone());
+        pieces.push(PieceView::new(Some(id.clone()), piece.clone()));
+        by_id.insert(id, piece);
     }
     *job_pieces.0.lock().unwrap() = by_id;
     let request = JobRequest {

@@ -7,7 +7,9 @@ use argentajo_core::nest::{
     Job, JobItem, Layout, NestError, Paper, Placement, Quantity, SheetLayout, nest,
 };
 use argentajo_core::output::{OutputOptions, render_page};
-use argentajo_core::piece::{Piece, PrepareOptions, RealSize, prepare_piece};
+use argentajo_core::piece::{
+    NORMAL_SIZE_ID, Piece, PrepareOptions, RealSize, Size, SizeInput, prepare_piece,
+};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -60,6 +62,11 @@ fn piece(contours: Vec<Vec<[f64; 2]>>, allow_rotation: bool, allow_mirror: bool)
         contours,
         allow_rotation,
         allow_mirror,
+        sizes: vec![Size {
+            id: NORMAL_SIZE_ID.into(),
+            name: "Normal".into(),
+            measure: RealSize::Width(w),
+        }],
     }
 }
 
@@ -72,7 +79,11 @@ fn job(sheet_mm: [f64; 2], items: Vec<(Piece, Quantity)>) -> Job {
         time_limit: TIME_LIMIT,
         items: items
             .into_iter()
-            .map(|(piece, quantity)| JobItem { piece, quantity })
+            .map(|(piece, quantity)| JobItem {
+                piece,
+                size_id: NORMAL_SIZE_ID.into(),
+                quantity,
+            })
             .collect(),
     }
 }
@@ -434,7 +445,11 @@ fn renders_the_page_in_mm_with_every_placed_part() {
         ))
         .unwrap(),
         &PrepareOptions {
-            size: Some(RealSize::Width(30.0)),
+            sizes: vec![SizeInput {
+                id: NORMAL_SIZE_ID.into(),
+                name: "Normal".into(),
+                measure: Some(RealSize::Width(30.0)),
+            }],
             ..Default::default()
         },
     )

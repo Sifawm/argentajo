@@ -15,7 +15,11 @@ import { AlertDialog, ToggleGroup } from "radix-ui";
 import { type DragEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  addAnotherSize,
+  addPiece,
+  changeItemSize,
   DEFAULT_OUTPUT,
+  dropMissingItems,
   exportPdf,
   fromJobRequest,
   type Item,
@@ -37,6 +41,7 @@ import {
   toJobRequest,
 } from "./job";
 import type { PieceView } from "./library";
+import { sizeLabel } from "./library";
 import {
   formatSize,
   fromUnit,
@@ -85,8 +90,8 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     () => new Map([...pieces, ...jobPieces].map((piece) => [piece.id, piece])),
     [pieces, jobPieces],
   );
-  // Pieces deleted from the Library drop out of the Job.
-  const jobItems = items.filter((item) => byId.has(item.id));
+  // Pieces deleted from the Library, or Sizes deleted from a Piece, drop out of the Job.
+  const jobItems = dropMissingItems(items, [...pieces, ...jobPieces]);
 
   const job = toJobRequest({
     paper,
@@ -107,7 +112,8 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     jobItems.length > 0 &&
     jobItems.every((item) => item.fill || (Number.isInteger(item.quantity) && item.quantity > 0));
 
-  // The settings changed since the preview was calculated. The time limit doesn't change a Layout.
+  // The settings changed since the preview was calculated. The time limit doesn't change a Layout,
+  // but a changed Item Size does because `toJobRequest` carries the Size id.
   const stale =
     result &&
     JSON.stringify(result.job) !== JSON.stringify({ ...job, timeLimitS: result.job.timeLimitS });
@@ -131,12 +137,11 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     saveMySheets(next).catch((e) => setError(t("mySheetsFailed", { error: String(e) })));
   };
 
-  const add = (id: string) =>
-    setItems((items) =>
-      items.some((item) => item.id === id)
-        ? items.map((item) => (item.id === id ? { ...item, quantity: item.quantity + 1 } : item))
-        : [...items, { id, quantity: 1, fill: false }],
-    );
+  const add = (id: string) => {
+    const piece = byId.get(id);
+    if (!piece) return;
+    setItems((items) => addPiece(items, piece));
+  };
 
   const onDrop = (e: DragEvent) => {
     e.preventDefault();
@@ -172,10 +177,13 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     if (valid) calculate({ ...job, sheetsMm: next });
   };
 
-  /** Takes the piece out of the Job and nests what's left, if anything. */
-  const exclude = (id: string) => {
-    setItems((items) => items.filter((item) => item.id !== id));
-    const next = { ...job, items: job.items.filter((item) => item.id !== id) };
+  /** Takes the Item (Piece at one Size) out of the Job and nests what's left, if anything. */
+  const exclude = (id: string, size: string) => {
+    setItems((items) => items.filter((item) => !(item.id === id && item.size === size)));
+    const next = {
+      ...job,
+      items: job.items.filter((item) => !(item.id === id && item.size_id === size)),
+    };
     if (next.items.length > 0) {
       if (valid) calculate(next);
       return;
@@ -278,23 +286,30 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     />
   );
 
-  const sizeMm = (piece: PieceView) => formatSize(t, piece.sizeMm, unit);
+  const changeSize = (item: Item, newSizeId: string) => {
+    if (item.size === newSizeId) return;
+    setItems((items) =>
+      changeItemSize(items, { id: item.id, size: item.size }, newSizeId, [...pieces, ...jobPieces]),
+    );
+  };
 
   const counts = result?.job.items.flatMap((item, i) => {
+    if (!result) return [];
     const piece = byId.get(item.id);
-    const fill = item.quantity === "fill";
-    return piece
-      ? [
-          {
-            piece,
-            // Fill asks for as many as were placed.
-            quantity: item.quantity === "fill" ? result.view.placed[i] : item.quantity.fixed,
-            fill,
-            placed: result.view.placed[i],
-            missing: result.view.missing[i],
-          },
-        ]
-      : [];
+    const size = piece?.sizes.find((s) => s.id === item.size_id);
+    if (!piece || !size) return [];
+    const quantity: number = item.quantity === "fill" ? result.view.placed[i] : item.quantity.fixed;
+    return [
+      {
+        piece,
+        size,
+        label: sizeLabel(piece, size.id, unit, t),
+        quantity,
+        fill: item.quantity === "fill",
+        placed: result.view.placed[i],
+        missing: result.view.missing[i],
+      },
+    ];
   });
   const missing = counts?.filter((count) => count.missing > 0);
   const placed = result?.view.placed.reduce((a, b) => a + b, 0) ?? 0;
@@ -463,46 +478,87 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
             {jobItems.map((item) => {
               const piece = byId.get(item.id)!;
               return (
-                <li key={item.id} className="flex items-center gap-3">
+                <li
+                  key={`${item.id}:${item.size}`}
+                  className="flex items-start gap-3 rounded-md border border-zinc-200 p-2"
+                >
                   {thumbnail(piece)}
-                  <span className="flex-1 text-xs text-zinc-600">{sizeMm(piece)}</span>
-                  <input
-                    type="number"
-                    min="1"
-                    step="1"
-                    aria-label={t("quantity")}
-                    disabled={item.fill}
-                    value={Number.isNaN(item.quantity) ? "" : item.quantity}
-                    onChange={(e) => {
-                      const quantity = e.target.valueAsNumber;
-                      setItems((items) =>
-                        items.map((i) => (i.id === item.id ? { ...i, quantity } : i)),
-                      );
-                    }}
-                    className="w-16 rounded-md border border-zinc-300 px-2 py-1 text-sm disabled:opacity-40"
-                  />
-                  <label className="flex items-center gap-1 text-xs" title={t("fillHint")}>
-                    <input
-                      type="checkbox"
-                      checked={item.fill}
-                      onChange={(e) => {
-                        const fill = e.target.checked;
+                  <div className="flex min-w-0 flex-1 flex-col gap-2">
+                    <select
+                      value={item.size}
+                      disabled={item.fixed}
+                      onChange={(e) => changeSize(item, e.target.value)}
+                      className="min-w-0 rounded-md border border-zinc-300 px-2 py-1 text-xs disabled:opacity-60"
+                    >
+                      {piece.sizes.map((size) => (
+                        <option key={size.id} value={size.id}>
+                          {sizeLabel(piece, size.id, unit, t)}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        aria-label={t("quantity")}
+                        disabled={item.fill}
+                        value={Number.isNaN(item.quantity) ? "" : item.quantity}
+                        onChange={(e) => {
+                          const quantity = e.target.valueAsNumber;
+                          setItems((items) =>
+                            items.map((i) =>
+                              i.id === item.id && i.size === item.size ? { ...i, quantity } : i,
+                            ),
+                          );
+                        }}
+                        className="w-20 rounded-md border border-zinc-300 px-2 py-1 text-sm disabled:opacity-40"
+                      />
+                      <label className="flex items-center gap-1 text-xs" title={t("fillHint")}>
+                        <input
+                          type="checkbox"
+                          checked={item.fill}
+                          onChange={(e) => {
+                            const fill = e.target.checked;
+                            setItems((items) =>
+                              items.map((i) =>
+                                i.id === item.id && i.size === item.size ? { ...i, fill } : i,
+                              ),
+                            );
+                          }}
+                        />
+                        {t("fill")}
+                      </label>
+                    </div>
+                  </div>
+                  <div className="flex flex-col items-center gap-1">
+                    <button
+                      type="button"
+                      aria-label={t("remove")}
+                      title={t("remove")}
+                      onClick={() =>
                         setItems((items) =>
-                          items.map((i) => (i.id === item.id ? { ...i, fill } : i)),
-                        );
+                          items.filter((i) => !(i.id === item.id && i.size === item.size)),
+                        )
+                      }
+                      className="rounded-md p-1 text-zinc-500 hover:text-red-700"
+                    >
+                      <X aria-hidden className="size-4" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={item.fixed || !addAnotherSize(items, piece)}
+                      onClick={() => {
+                        const next = addAnotherSize(items, piece);
+                        if (next) setItems(next);
                       }}
-                    />
-                    {t("fill")}
-                  </label>
-                  <button
-                    type="button"
-                    aria-label={t("remove")}
-                    title={t("remove")}
-                    onClick={() => setItems((items) => items.filter((i) => i.id !== item.id))}
-                    className="rounded-md p-1 text-zinc-500 hover:text-red-700"
-                  >
-                    <X aria-hidden className="size-4" />
-                  </button>
+                      aria-label={t("addAnotherSize")}
+                      title={t("addAnotherSize")}
+                      className="rounded-md p-1 text-zinc-500 hover:text-zinc-900 disabled:opacity-40"
+                    >
+                      <Plus aria-hidden className="size-4" />
+                    </button>
+                  </div>
                 </li>
               );
             })}
@@ -516,8 +572,10 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
                   draggable
                   onDragStart={(e) => e.dataTransfer.setData(DRAG_TYPE, piece.id!)}
                   onClick={() => add(piece.id!)}
-                  aria-label={t("addPiece", { size: sizeMm(piece) })}
-                  title={sizeMm(piece)}
+                  aria-label={t("addPiece", {
+                    size: sizeLabel(piece, piece.sizes[0]?.id ?? "", unit, t),
+                  })}
+                  title={sizeLabel(piece, piece.sizes[0]?.id ?? "", unit, t)}
                   className="w-full rounded bg-white p-1 shadow-sm"
                 >
                   {thumbnail(piece, "aspect-square w-full")}
@@ -598,8 +656,9 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
             </p>
             <ul className="flex flex-wrap gap-4 text-sm">
               {counts?.map((count) => (
-                <li key={count.piece.id} className="flex items-center gap-2">
+                <li key={`${count.piece.id}:${count.size.id}`} className="flex items-center gap-2">
                   {thumbnail(count.piece, "size-8")}
+                  <span className="text-xs text-zinc-600">{count.label}</span>
                   {count.fill
                     ? t("placedFill", { placed: count.placed })
                     : t("placedOf", { placed: count.placed, quantity: count.quantity })}
@@ -607,7 +666,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
                     type="button"
                     aria-label={t("exclude")}
                     title={t("exclude")}
-                    onClick={() => exclude(count.piece.id!)}
+                    onClick={() => exclude(count.piece.id!, count.size.id)}
                     className="rounded-md p-1 text-zinc-500 hover:text-red-700"
                   >
                     <X aria-hidden className="size-4" />
@@ -623,11 +682,11 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
                   {t("missing")}
                 </span>
                 <ul className="flex flex-wrap gap-4">
-                  {missing.map(({ piece, missing }) => (
-                    <li key={piece.id} className="flex items-center gap-2">
+                  {missing.map(({ piece, size, missing, label }) => (
+                    <li key={`${piece.id}:${size.id}`} className="flex items-center gap-2">
                       {t("times", { count: missing })}
                       {thumbnail(piece, "size-8")}
-                      <span className="text-xs">{sizeMm(piece)}</span>
+                      <span className="text-xs">{label}</span>
                     </li>
                   ))}
                 </ul>

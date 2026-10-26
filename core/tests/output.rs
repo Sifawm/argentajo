@@ -3,7 +3,7 @@
 use argentajo_core::nest::Quantity::Fixed;
 use argentajo_core::nest::{Job, JobItem, Layout, Paper, Placement, SheetLayout};
 use argentajo_core::output::{OutputOptions, export_pdf, render_page};
-use argentajo_core::piece::{PrepareOptions, RealSize, prepare_piece};
+use argentajo_core::piece::{NORMAL_SIZE_ID, PrepareOptions, RealSize, SizeInput, prepare_piece};
 use resvg::usvg::{Rect, Tree};
 use std::time::Duration;
 
@@ -19,7 +19,11 @@ fn job_and_layout() -> (Job, Layout) {
         ))
         .unwrap(),
         &PrepareOptions {
-            size: Some(RealSize::Width(20.0)),
+            sizes: vec![SizeInput {
+                id: NORMAL_SIZE_ID.into(),
+                name: "Normal".into(),
+                measure: Some(RealSize::Width(20.0)),
+            }],
             ..Default::default()
         },
     )
@@ -35,6 +39,7 @@ fn job_and_layout() -> (Job, Layout) {
         time_limit: Duration::from_secs(1),
         items: vec![JobItem {
             piece: ring,
+            size_id: NORMAL_SIZE_ID.into(),
             quantity: Fixed(3),
         }],
     };

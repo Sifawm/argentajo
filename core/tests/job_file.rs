@@ -5,7 +5,7 @@ use argentajo_core::job_file::{SavedJob, open_job, save_job};
 use argentajo_core::nest::Quantity::{Fill, Fixed};
 use argentajo_core::nest::{Job, JobItem, Paper, nest};
 use argentajo_core::output::OutputOptions;
-use argentajo_core::piece::{PrepareOptions, RealSize, prepare_piece};
+use argentajo_core::piece::{NORMAL_SIZE_ID, PrepareOptions, RealSize, SizeInput, piece_at_size, prepare_piece};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::Duration;
 
@@ -23,7 +23,11 @@ fn saved() -> SavedJob {
         prepare_piece(
             &fixture(name),
             &PrepareOptions {
-                size: Some(RealSize::Width(width)),
+                sizes: vec![SizeInput {
+                    id: NORMAL_SIZE_ID.into(),
+                    name: "Normal".into(),
+                    measure: Some(RealSize::Width(width)),
+                }],
                 ..Default::default()
             },
         )
@@ -41,10 +45,12 @@ fn saved() -> SavedJob {
         items: vec![
             JobItem {
                 piece: prepare("ring.png", 18.3),
+                size_id: NORMAL_SIZE_ID.into(),
                 quantity: Fixed(3),
             },
             JobItem {
                 piece: prepare("two_parts.png", 21.7),
+                size_id: NORMAL_SIZE_ID.into(),
                 quantity: Fill,
             },
         ],
@@ -133,4 +139,77 @@ fn placement(saved: &mut SavedJob) -> &mut argentajo_core::nest::Placement {
         .flat_map(|sheet| &mut sheet.placements)
         .next()
         .unwrap()
+}
+
+#[test]
+fn a_job_with_pieces_at_different_sizes_round_trips() {
+    let piece = prepare_piece(
+        &fixture("flower_on_white.png"),
+        &PrepareOptions {
+            sizes: vec![
+                SizeInput {
+                    id: "small".into(),
+                    name: "Small".into(),
+                    measure: Some(RealSize::Width(20.0)),
+                },
+                SizeInput {
+                    id: "large".into(),
+                    name: "Large".into(),
+                    measure: Some(RealSize::Width(40.0)),
+                },
+            ],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let job = Job {
+        paper: Paper {
+            size_mm: [297.0, 210.0],
+            margin_mm: 5.0,
+        },
+        sheets_mm: vec![[80.0, 50.0]],
+        separation_mm: 1.0,
+        edge_margin_mm: 1.5,
+        time_limit: Duration::from_millis(500),
+        items: vec![
+            JobItem {
+                piece: piece_at_size(&piece, "small").unwrap(),
+                size_id: "small".into(),
+                quantity: Fixed(1),
+            },
+            JobItem {
+                piece: piece_at_size(&piece, "large").unwrap(),
+                size_id: "large".into(),
+                quantity: Fixed(1),
+            },
+        ],
+    };
+    let saved = SavedJob {
+        job,
+        layout: None,
+        output: OutputOptions::default(),
+    };
+    let opened = open_job(save_job(&saved).as_bytes()).unwrap();
+    assert_eq!(opened, saved);
+    for item in &opened.job.items {
+        assert_eq!(item.piece.sizes.len(), 1);
+        assert_eq!(item.piece.sizes[0].id, item.size_id);
+    }
+}
+
+#[test]
+fn an_old_job_file_without_sizes_opens_as_normal() {
+    let saved = saved();
+    let mut value = serde_json::to_value(&saved).unwrap();
+    for item in value["job"]["items"].as_array_mut().unwrap() {
+        item.as_object_mut().unwrap().remove("sizeId");
+        item["piece"].as_object_mut().unwrap().remove("sizes");
+    }
+    let opened = open_job(serde_json::to_vec(&value).unwrap().as_slice()).unwrap();
+    for item in &opened.job.items {
+        assert_eq!(item.size_id, NORMAL_SIZE_ID);
+        assert_eq!(item.piece.sizes.len(), 1);
+        assert_eq!(item.piece.sizes[0].id, NORMAL_SIZE_ID);
+        assert_eq!(item.piece.sizes[0].name, "Normal");
+    }
 }

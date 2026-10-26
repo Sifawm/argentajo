@@ -1,8 +1,11 @@
 import {
+  Bookmark,
   Brush,
   Eraser,
+  GripVertical,
   Maximize,
   Redo2,
+  Trash2,
   TriangleAlert,
   Undo2,
   ZoomIn,
@@ -20,12 +23,29 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  DndContext,
+  type DragEndEvent,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
   addToLibrary,
   type Edits,
+  MIN_PPI,
   type PieceView,
   type PrepareOptions,
   previewPiece,
   splitToLibrary,
+  type SizeInput,
   updatePiece,
 } from "./library";
 import { formatSize, fromUnit, toUnit, usePreferences } from "./preferences";
@@ -51,22 +71,221 @@ interface Props {
   onSaved: (pieces: PieceView[]) => void;
 }
 
+type EditorSize = {
+  id: string;
+  name: string;
+  side: Side;
+  /** Typed measure in the display unit; empty means "derive from the image" (only valid for the first size). */
+  text: string;
+};
+
+const newId = () => crypto.randomUUID();
+
+const formatMeasure = (mm: number, unit: Parameters<typeof toUnit>[1]) =>
+  String(Number(toUnit(mm, unit).toFixed(2)));
+
+const toEditorSize = (size: SizeInput, unit: Parameters<typeof toUnit>[1]): EditorSize => {
+  if (size.measure) {
+    return "width" in size.measure
+      ? {
+          id: size.id,
+          name: size.name,
+          side: "width",
+          text: formatMeasure(size.measure.width, unit),
+        }
+      : {
+          id: size.id,
+          name: size.name,
+          side: "height",
+          text: formatMeasure(size.measure.height, unit),
+        };
+  }
+  return { id: size.id, name: size.name, side: "width", text: "" };
+};
+
+const toMeasure = (
+  size: EditorSize,
+  unit: Parameters<typeof fromUnit>[1],
+): SizeInput["measure"] => {
+  const text = size.text.trim();
+  if (text === "") return undefined;
+  const value = Number(text);
+  if (Number.isNaN(value)) return undefined;
+  const mm = fromUnit(value, unit);
+  if (!(mm > 0)) return undefined;
+  return size.side === "width" ? { width: mm } : { height: mm };
+};
+
+/** Reorders `sizes` so the default Size is first, keeping the rest in their current order. */
+const withDefaultFirst = (sizes: EditorSize[], defaultSizeId: string | undefined): EditorSize[] => {
+  if (!defaultSizeId) return sizes;
+  const index = sizes.findIndex((s) => s.id === defaultSizeId);
+  if (index <= 0) return sizes;
+  return [sizes[index], ...sizes.slice(0, index), ...sizes.slice(index + 1)];
+};
+
+const initialSizes = (
+  savedSizes: SizeInput[] | undefined,
+  unit: Parameters<typeof toUnit>[1],
+): EditorSize[] => {
+  if (savedSizes && savedSizes.length > 0) return savedSizes.map((s) => toEditorSize(s, unit));
+  return [{ id: newId(), name: "Normal", side: "width", text: "" }];
+};
+
+interface SortableSizeItemProps {
+  size: EditorSize;
+  selected: boolean;
+  isDefault: boolean;
+  canDelete: boolean;
+  unit: Parameters<typeof toUnit>[1];
+  error?: string;
+  onSelect: () => void;
+  onMakeDefault: () => void;
+  onUpdate: (patch: Partial<EditorSize>) => void;
+  onDelete: () => void;
+}
+
+const SortableSizeItem = ({
+  size,
+  selected,
+  isDefault,
+  canDelete,
+  unit,
+  error,
+  onSelect,
+  onMakeDefault,
+  onUpdate,
+  onDelete,
+}: SortableSizeItemProps) => {
+  const { t } = useTranslation("library");
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: size.id,
+  });
+  const style = { transform: CSS.Transform.toString(transform), transition };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`group flex items-start gap-2 rounded-md border border-zinc-200 p-2 transition-colors ${
+        selected ? "border-l-2 border-l-zinc-900 bg-zinc-50" : ""
+      } ${isDragging ? "opacity-50" : ""}`}
+    >
+      <button
+        type="button"
+        {...attributes}
+        {...listeners}
+        aria-label={t("dragSize")}
+        title={t("dragSize")}
+        className="mt-1 shrink-0 cursor-grab text-zinc-400 hover:text-zinc-700 active:cursor-grabbing"
+      >
+        <GripVertical aria-hidden className="size-5" />
+      </button>
+      <input
+        type="radio"
+        name="selectedSize"
+        checked={selected}
+        onChange={onSelect}
+        aria-label={t("size")}
+        className="mt-2 shrink-0"
+      />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onMakeDefault();
+            }}
+            disabled={isDefault}
+            aria-label={isDefault ? t("defaultSize") : t("makeDefault")}
+            title={isDefault ? t("defaultSize") : t("makeDefault")}
+            className={`shrink-0 rounded-md p-1 ${
+              isDefault ? "text-amber-500" : "text-zinc-400 hover:text-zinc-700"
+            }`}
+          >
+            <Bookmark aria-hidden className="size-4" fill={isDefault ? "currentColor" : "none"} />
+          </button>
+          <input
+            type="text"
+            value={size.name}
+            onChange={(e) => onUpdate({ name: e.target.value })}
+            aria-label={t("sizeName")}
+            className="min-w-0 flex-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="flex shrink-0 overflow-hidden rounded-md border border-zinc-300">
+            <button
+              type="button"
+              title={t("width", { unit })}
+              onClick={() => onUpdate({ side: "width" })}
+              className={`px-2 py-1 text-xs ${
+                size.side === "width" ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-100"
+              }`}
+            >
+              ↔
+            </button>
+            <button
+              type="button"
+              title={t("height", { unit })}
+              onClick={() => onUpdate({ side: "height" })}
+              className={`px-2 py-1 text-xs ${
+                size.side === "height" ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-100"
+              }`}
+            >
+              ↕
+            </button>
+          </div>
+          <input
+            type="number"
+            min="0"
+            step="0.1"
+            value={size.text}
+            onChange={(e) => onUpdate({ text: e.target.value })}
+            aria-label={t(size.side, { unit })}
+            className="w-24 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+          />
+        </div>
+        {error && <p className="text-xs text-red-700">{error}</p>}
+      </div>
+      <div className="flex w-8 shrink-0 items-center justify-center self-stretch">
+        {canDelete && (
+          <button
+            type="button"
+            onClick={onDelete}
+            aria-label={t("deleteSize")}
+            title={t("deleteSize")}
+            className="rounded-md p-1.5 text-zinc-400 opacity-0 transition-opacity duration-150 hover:text-red-700 group-hover:opacity-100"
+          >
+            <Trash2 aria-hidden className="size-4" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
+
 export default function PieceEditor({ image, type, saved, onClose, onSaved }: Props) {
   const { t } = useTranslation("library");
-  // The editor is modal, so the unit can't change under the typed size.
+  // The editor is modal, so the unit can't change under the typed sizes.
   const { unit } = usePreferences();
   const [tolerance, setTolerance] = useState(saved?.options.tolerance ?? 32);
-  // The side the jeweller typed, in the display unit; the other one follows the proportions. Until
-  // then, `core` takes the size from the file's DPI.
-  const [size, setSize] = useState<{ side: Side; text: string } | undefined>(() => {
-    const realSize = saved?.options.size;
-    if (!realSize) return undefined;
-    // Shown like the computed side; a split piece's width is a long fraction.
-    const text = (mm: number) => String(Number(toUnit(mm, unit).toFixed(2)));
-    return "width" in realSize
-      ? { side: "width", text: text(realSize.width) }
-      : { side: "height", text: text(realSize.height) };
+  const [editorInitial] = useState(() => {
+    const sizes = initialSizes(saved?.options.sizes, unit);
+    return {
+      sizes,
+      selectedSizeId: sizes[0]?.id,
+      defaultSizeId: saved?.options.sizes[0]?.id ?? sizes[0]?.id,
+    };
   });
+  const [sizes, setSizes] = useState<EditorSize[]>(editorInitial.sizes);
+  const [selectedSizeId, setSelectedSizeId] = useState<string | undefined>(
+    editorInitial.selectedSizeId,
+  );
+  const [defaultSizeId, setDefaultSizeId] = useState<string | undefined>(
+    editorInitial.defaultSizeId,
+  );
   const [allowRotation, setAllowRotation] = useState(saved?.options.allowRotation ?? true);
   const [allowMirror, setAllowMirror] = useState(saved?.options.allowMirror ?? false);
   const [preview, setPreview] = useState<PieceView>();
@@ -82,7 +301,6 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
   const [cursorVisible, setCursorVisible] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [spacePressed, setSpacePressed] = useState(false);
-  const [isSizing, setIsSizing] = useState(false);
   const [, setHistoryTick] = useState(0);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -124,13 +342,73 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     return () => URL.revokeObjectURL(url);
   }, [image, type]);
 
-  const side = size?.side;
-  const mm = fromUnit(Number(size?.text), unit);
-  const options = useMemo<PrepareOptions | undefined>(() => {
-    if (side && !(mm > 0)) return undefined;
-    const realSize = side === "width" ? { width: mm } : side === "height" ? { height: mm } : null;
-    return { tolerance, size: realSize, allowRotation, allowMirror };
-  }, [tolerance, side, mm, allowRotation, allowMirror]);
+  // Keep the selected and default sizes valid when rows are deleted or reordered.
+  useEffect(() => {
+    if (selectedSizeId && sizes.some((s) => s.id === selectedSizeId)) return;
+    setSelectedSizeId(sizes[0]?.id);
+  }, [sizes, selectedSizeId]);
+
+  useEffect(() => {
+    if (defaultSizeId && sizes.some((s) => s.id === defaultSizeId)) return;
+    setDefaultSizeId(sizes[0]?.id);
+  }, [sizes, defaultSizeId]);
+
+  const validationErrors = useMemo(() => {
+    const errors: Record<string, string> = {};
+    const seenIds = new Set<string>();
+    const seenNames = new Set<string>();
+    sizes.forEach((size, index) => {
+      if (seenIds.has(size.id)) {
+        errors[size.id] = t("duplicateSizeId");
+      }
+      seenIds.add(size.id);
+      const trimmed = size.name.trim();
+      if (trimmed === "") {
+        errors[size.id] = t("emptySizeName");
+      } else if ([...seenNames].some((n) => n.toLowerCase() === trimmed.toLowerCase())) {
+        errors[size.id] = t("duplicateSizeName");
+      }
+      seenNames.add(trimmed);
+      if (index > 0 && !toMeasure(size, unit)) {
+        errors[size.id] = t("sizeMeasure");
+      }
+    });
+    return errors;
+  }, [sizes, unit, t]);
+
+  // `core` expects the Default size first; the editor keeps the user's order, so we reorder on save/preview.
+  const orderedSizes = useMemo(
+    () => withDefaultFirst(sizes, defaultSizeId),
+    [sizes, defaultSizeId],
+  );
+
+  const options = useMemo<PrepareOptions>(
+    () => ({
+      tolerance,
+      sizes: orderedSizes.map((s) => ({
+        id: s.id,
+        name: s.name.trim(),
+        measure: toMeasure(s, unit),
+      })),
+      allowRotation,
+      allowMirror,
+    }),
+    [tolerance, orderedSizes, unit, allowRotation, allowMirror],
+  );
+
+  // The preview follows the selected Size, not the Default size: reorder so the selected one is
+  // first, because `core` prepares the Piece at the first Size.
+  const previewOptions = useMemo<PrepareOptions>(() => {
+    if (!selectedSizeId) return options;
+    const selectedIndex = orderedSizes.findIndex((s) => s.id === selectedSizeId);
+    if (selectedIndex <= 0) return options;
+    const reordered = arrayMove(orderedSizes, selectedIndex, 0);
+    return {
+      ...options,
+      sizes: reordered.map((s) => ({ id: s.id, name: s.name.trim(), measure: toMeasure(s, unit) })),
+    };
+  }, [options, orderedSizes, selectedSizeId, unit]);
+
   // Decoded by `core` (SVGs rasterised), so the overlay and the edits share its pixel grid.
   const [sourceW, sourceH] = preview?.sourcePx ?? [];
 
@@ -184,10 +462,9 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
 
   // Re-prepare live, debounced so dragging the slider doesn't queue up a run per step.
   useEffect(() => {
-    if (!options) return;
     let stale = false;
     const timer = setTimeout(() => {
-      previewPiece(image, options, edits).then(
+      previewPiece(image, previewOptions, edits).then(
         (piece) => {
           if (stale) return;
           setPreview(piece);
@@ -202,7 +479,7 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
       stale = true;
       clearTimeout(timer);
     };
-  }, [image, options, edits]);
+  }, [image, previewOptions, edits]);
 
   const exportEdits = () =>
     new Promise<Edits | undefined>((resolve) => {
@@ -245,17 +522,30 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     setEdits(next);
   };
 
+  const optionsForSave = (defaultSizeMm: [number, number]): PrepareOptions => {
+    const fallbackWidth = defaultSizeMm[0];
+    return {
+      tolerance,
+      sizes: sizes.map((s) => {
+        const measure = toMeasure(s, unit);
+        return { id: s.id, name: s.name.trim(), measure: measure ?? { width: fallbackWidth } };
+      }),
+      allowRotation,
+      allowMirror,
+    };
+  };
+
   const accept = (split: boolean) => {
-    if (!options) return;
+    if (!preview) return;
+    const saveOptions = optionsForSave(preview.sizeMm);
     setSaving(true);
-    // Exported afresh: the last stroke's preview may still be pending.
     void exportEdits()
       .then((edits) =>
         split
-          ? splitToLibrary(image, options, edits)
+          ? splitToLibrary(image, saveOptions, edits)
           : (saved
-              ? updatePiece(saved.id, image, type, options, edits)
-              : addToLibrary(image, type, options, edits)
+              ? updatePiece(saved.id, image, type, saveOptions, edits)
+              : addToLibrary(image, type, saveOptions, edits)
             ).then((piece) => [piece]),
       )
       .then(onSaved, (e) => {
@@ -565,29 +855,57 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     </button>
   );
 
-  const sizeInput = (inputSide: Side, index: 0 | 1) => (
-    <label className="flex flex-col gap-1 text-sm">
-      {t(inputSide, { unit })}
-      <input
-        type="number"
-        min="0"
-        step="0.1"
-        value={
-          size?.side === inputSide
-            ? size.text
-            : preview
-              ? toUnit(preview.sizeMm[index], unit).toFixed(2)
-              : ""
-        }
-        onChange={(e) => setSize({ side: inputSide, text: e.target.value })}
-        className="w-28 rounded-md border border-zinc-300 px-2 py-1"
-      />
-    </label>
-  );
+  const updateSize = (id: string, patch: Partial<EditorSize>) => {
+    setSizes((sizes) => sizes.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  };
 
-  const cursorOverlayVisible = !isPanning && ((cursorVisible && !!tool) || isSizing);
-  const centerX = (containerRef.current?.clientWidth ?? 0) / 2 - PADDING;
-  const centerY = (containerRef.current?.clientHeight ?? 0) / 2 - PADDING;
+  const makeDefault = (id: string) => {
+    setDefaultSizeId(id);
+  };
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setSizes((sizes) => {
+      const oldIndex = sizes.findIndex((s) => s.id === active.id);
+      const newIndex = sizes.findIndex((s) => s.id === over.id);
+      return arrayMove(sizes, oldIndex, newIndex);
+    });
+  };
+
+  const deleteSize = (id: string) => {
+    if (sizes.length <= 1) return;
+    setSizes((sizes) => sizes.filter((s) => s.id !== id));
+    if (defaultSizeId === id) {
+      const nextDefault = sizes.find((s) => s.id !== id);
+      setDefaultSizeId(nextDefault?.id);
+    }
+    if (selectedSizeId === id) {
+      const nextSelected = sizes.find((s) => s.id !== id);
+      setSelectedSizeId(nextSelected?.id);
+    }
+  };
+
+  const addSize = () => {
+    const n = sizes.length + 1;
+    const size: EditorSize = {
+      id: newId(),
+      name: t("newSizeName", { n }),
+      side: "width",
+      text: "",
+    };
+    setSizes((sizes) => [...sizes, size]);
+    setSelectedSizeId(size.id);
+  };
+
+  // `preview` is prepared for the selected Size, so its dimensions and ppi are already correct.
+  const selectedDims = preview?.sizeMm;
+  const selectedPpi = preview?.ppi;
+
+  const cursorOverlayVisible = !isPanning && cursorVisible && !!tool;
+  const hasErrors = Object.keys(validationErrors).length > 0;
 
   return (
     <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
@@ -666,14 +984,13 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
                       height="100%"
                     >
                       {cursorVisible && cursor && renderCursor(cursor.x, cursor.y)}
-                      {isSizing && renderCursor(centerX, centerY)}
                     </svg>
                   )}
                 </>
               )}
             </div>
 
-            <div className="flex w-64 flex-col gap-5">
+            <div className="flex w-72 flex-col gap-5">
               <label className="flex flex-col gap-2 text-sm">
                 <span>
                   {t("tolerance")}: {tolerance}
@@ -716,8 +1033,8 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
                   MIN_BRUSH,
                   MAX_BRUSH,
                   setBrushSizeAndRef,
-                  () => setIsSizing(true),
-                  () => setIsSizing(false),
+                  () => {},
+                  () => {},
                 )}
                 <span className="text-xs text-zinc-500">{t("toolsHint")}</span>
               </div>
@@ -731,20 +1048,55 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
                 </div>
               </div>
 
-              <div className="flex gap-3">
-                {sizeInput("width", 0)}
-                {sizeInput("height", 1)}
+              <div className="flex flex-col gap-2">
+                <span className="text-sm">{t("sizes")}</span>
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCenter}
+                  onDragEnd={handleDragEnd}
+                >
+                  <SortableContext
+                    items={sizes.map((s) => s.id)}
+                    strategy={verticalListSortingStrategy}
+                  >
+                    <div className="flex max-h-56 flex-col gap-2 overflow-y-auto">
+                      {sizes.map((size) => (
+                        <SortableSizeItem
+                          key={size.id}
+                          size={size}
+                          selected={size.id === selectedSizeId}
+                          isDefault={size.id === defaultSizeId}
+                          canDelete={sizes.length > 1}
+                          unit={unit}
+                          error={validationErrors[size.id]}
+                          onSelect={() => setSelectedSizeId(size.id)}
+                          onMakeDefault={() => makeDefault(size.id)}
+                          onUpdate={(patch) => updateSize(size.id, patch)}
+                          onDelete={() => deleteSize(size.id)}
+                        />
+                      ))}
+                    </div>
+                  </SortableContext>
+                </DndContext>
+                <button
+                  type="button"
+                  onClick={addSize}
+                  className="self-start rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100"
+                >
+                  {t("addSize")}
+                </button>
               </div>
-              {preview && (
+
+              {selectedDims && (
                 <p className="text-sm text-zinc-600">
-                  {formatSize(t, preview.sizeMm, unit)} ·{" "}
-                  {t("sizePx", { w: preview.sizePx[0], h: preview.sizePx[1] })}
+                  {formatSize(t, selectedDims, unit)} ·{" "}
+                  {t("sizePx", { w: preview!.sizePx[0], h: preview!.sizePx[1] })}
                 </p>
               )}
-              {preview?.lowResolution && (
+              {selectedPpi !== undefined && selectedPpi < MIN_PPI && (
                 <p role="status" className="flex gap-2 text-sm text-amber-700">
                   <TriangleAlert aria-hidden className="size-4 shrink-0" />
-                  {t("lowResolution", { ppi: Math.round(preview.ppi) })}
+                  {t("lowResolution", { ppi: Math.round(selectedPpi) })}
                 </p>
               )}
 
@@ -781,7 +1133,7 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
             {!saved && preview && preview.contours.length > 1 && (
               <button
                 type="button"
-                disabled={!options || !!error || saving}
+                disabled={!preview || hasErrors || saving}
                 onClick={() => accept(true)}
                 className="rounded-md border border-zinc-300 px-4 py-2 text-sm disabled:opacity-40"
               >
@@ -790,7 +1142,7 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
             )}
             <button
               type="button"
-              disabled={!options || !preview || !!error || saving}
+              disabled={!preview || hasErrors || saving}
               onClick={() => accept(false)}
               className="rounded-md bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-40"
             >
