@@ -672,6 +672,7 @@ fn fill_alone_keeps_improving_until_the_time_limit_and_repeats_with_the_seed() {
             start.elapsed()
         );
         assert_eq!(reported.last(), Some(&layout));
+        assert!(reported.len() > 1, "sparrow improves on the greedy fill");
         for pair in reported.windows(2) {
             assert!(pair[1].utilisation > pair[0].utilisation);
         }

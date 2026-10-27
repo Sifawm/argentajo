@@ -25,6 +25,7 @@ use sparrow::optimizer::optimize;
 use sparrow::sample::search::search_placement;
 use sparrow::util::listener::{ReportType, SeparationProgress, SolutionListener};
 use sparrow::util::terminator::{BasicTerminator, Terminator};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -349,7 +350,8 @@ struct Nested {
 
 /// Strip-packs `quantities`' fixed copies along the Sheet's long side with sparrow, compacted
 /// towards its start. Copies past the Sheet's end, or that don't fit it at all, are left out.
-/// Copies of Fill items then go into the silver left over, as many as fit.
+/// Copies of Fill items then go into the silver left over, as many as fit. With no fixed copies,
+/// sparrow packs a tenth more Fill copies than the best so far, the gaps it leaves filled.
 ///
 /// Runs until `deadline` or `cancel`, though always until a first result, and returns the best
 /// found: the most silver used by fixed quantities, then the most used in all, then the shortest
@@ -457,11 +459,11 @@ fn nest_sheet(
     // In the strip, the end of the Sheet's far edge margin.
     let end = long - margin - inset;
 
-    // Per Part, the placements that end before the Sheet's far edge margin, nearest the start first,
-    // with the length of Sheet they use.
+    // Of `demand` copies per Job item, the placements that end before the Sheet's far edge margin,
+    // nearest the start first, with the length of Sheet they use.
     // ponytail: copies past the end are dropped from the full-quantity solution, leaving their gaps
     // for fill only; re-run sparrow on what fits if those gaps ever matter.
-    let keep = |unplaceable: &[bool], solution: Solution| {
+    let keep = |unplaceable: &[bool], demand: &[u32], solution: Solution| {
         let mut fitting = vec![vec![]; parts.len()];
         for placed in solution {
             let (i, part) = parts[placed.item_id as usize];
@@ -474,7 +476,7 @@ fn nest_sheet(
                 fitting[placed.item_id as usize].push((reach, placed));
             }
         }
-        let mut placed: Vec<u32> = quantities.iter().map(|q| q.fixed()).collect();
+        let mut placed = demand.to_vec();
         for (&(i, _), fits) in parts.iter().zip(&mut fitting) {
             placed[i] = placed[i].min(fits.len() as u32);
             fits.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -667,8 +669,9 @@ fn nest_sheet(
         }
         // The same copies' areas summed in another order can differ in their last bits.
         let same = |a: f64, b: f64| (a - b).abs() < 1e-9;
-        let on_solution = |solution| {
-            let (kept, length) = keep(&unplaceable, solution);
+        let fixed: Vec<u32> = quantities.iter().map(|q| q.fixed()).collect();
+        let mut on_solution = |solution| {
+            let (kept, length) = keep(&unplaceable, &fixed, solution);
             let fixed = share(&nested_of(&kept));
             if best
                 .as_ref()
@@ -704,7 +707,10 @@ fn nest_sheet(
             deadline,
             cancel,
             iterations,
-            on_solution,
+            |solution| {
+                on_solution(solution);
+                ControlFlow::Continue(())
+            },
         ) {
             Ok(()) => break,
             // A Part that only just fits across on paper, but not once jagua-rs has simplified and
@@ -719,22 +725,61 @@ fn nest_sheet(
     }
     Ok(match best {
         Some((nested, ..)) => nested,
-        // No fixed quantities to place: only fill, retried with the next seeds until the run ends.
-        // ponytail: random restarts of the greedy fill; search around the best one if they plateau.
+        // No fixed quantities to place: only fill. The greedy fill first, then sparrow packs a tenth
+        // more copies of each Fill item than the best so far, until the run ends; each solution that
+        // gets more of them on the Sheet, its gaps filled, is a candidate, and once they all fit it
+        // aims higher. Greedy restarts plateau where sparrow keeps finding room.
+        // ponytail: a fixed tenth more per run of sparrow, each from scratch; tune the step, or carry
+        // the last solution over, if the climb from the greedy fill takes much of the run.
         None => {
             let mut best = nested_of(&fill(vec![], true, seed).0);
             on_progress(&best);
-            if filler.is_some() {
-                for seed in (1..).map(|k| seed.wrapping_add(k)) {
-                    let (filled, whole) = fill(vec![], false, seed);
-                    if !whole {
-                        break;
-                    }
-                    let nested = nested_of(&filled);
-                    if share(&nested) > share(&best) + 1e-9 {
-                        on_progress(&nested);
-                        best = nested;
-                    }
+            for seed in (1..).map(|k| seed.wrapping_add(k)) {
+                if filler.is_none() || cancel.load(Ordering::Relaxed) || Instant::now() > deadline {
+                    break;
+                }
+                let demand: Vec<u32> = (0..job.items.len())
+                    .map(|i| {
+                        if fillable.contains(&i) {
+                            best.placed[i] + (best.placed[i] / 10).max(1)
+                        } else {
+                            0
+                        }
+                    })
+                    .collect();
+                let items = (0..parts.len())
+                    .filter(|&id| demand[parts[id].0] > 0)
+                    .map(|id| ext_item(id, demand[parts[id].0] as u64))
+                    .collect();
+                let copies: usize = parts.iter().map(|&(i, _)| demand[i] as usize).sum();
+                // Of the Parts on the Sheet, in this run.
+                let mut most = 0;
+                let grown = strip_pack(
+                    instance(items),
+                    seed,
+                    deadline,
+                    cancel,
+                    iterations,
+                    |solution| {
+                        let (kept, _) = keep(&unplaceable, &demand, solution);
+                        if kept.len() > most {
+                            most = kept.len();
+                            let nested = nested_of(&fill(kept, false, seed).0);
+                            if share(&nested) > share(&best) + 1e-9 {
+                                on_progress(&nested);
+                                best = nested;
+                            }
+                        }
+                        if most == copies {
+                            ControlFlow::Break(())
+                        } else {
+                            ControlFlow::Continue(())
+                        }
+                    },
+                );
+                // The best so far stands.
+                if grown.is_err() {
+                    break;
                 }
             }
             best
@@ -767,8 +812,9 @@ fn fits_across(contour: &[[f64; 2]], step: Option<f64>, width: f64) -> bool {
     })
 }
 
-/// Runs sparrow until `deadline` or `cancel`, passing each feasible solution it reaches, every one
-/// narrower than the last, to `on_solution`, and counting its iterations in `iterations`.
+/// Runs sparrow until `deadline`, `cancel` or `on_solution` breaks, passing each feasible solution
+/// it reaches, every one narrower than the last, to `on_solution`, and counting its iterations in
+/// `iterations`.
 ///
 /// sparrow runs on its own thread: it checks for the end only between steps, and some steps take
 /// seconds on a crowded strip. This returns at the deadline or on cancel all the same, once there
@@ -781,7 +827,7 @@ fn strip_pack(
     deadline: Instant,
     cancel: &AtomicBool,
     iterations: &AtomicU64,
-    mut on_solution: impl FnMut(Solution),
+    mut on_solution: impl FnMut(Solution) -> ControlFlow<()>,
 ) -> anyhow::Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     let (send, solutions) = mpsc::channel();
@@ -821,9 +867,20 @@ fn strip_pack(
     loop {
         // Wakes this often to notice the deadline or a cancel between solutions.
         match solutions.recv_timeout(Duration::from_millis(20)) {
-            Ok(Report::Solution(solution)) => {
+            Ok(Report::Solution(mut solution)) => {
+                // `on_solution` can take longer than sparrow takes to narrow the strip again (a
+                // fill does): skip to the latest solution, counting the iterations behind it.
+                while let Ok(report) = solutions.try_recv() {
+                    match report {
+                        Report::Solution(newer) => solution = newer,
+                        Report::Iteration => _ = iterations.fetch_add(1, Ordering::Relaxed),
+                    }
+                }
                 solved = true;
-                on_solution(solution);
+                if on_solution(solution).is_break() {
+                    stop.store(true, Ordering::Relaxed);
+                    return Ok(());
+                }
             }
             Ok(Report::Iteration) => _ = iterations.fetch_add(1, Ordering::Relaxed),
             Err(RecvTimeoutError::Timeout) => {}
