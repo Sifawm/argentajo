@@ -16,6 +16,9 @@ export const PAPERS = {
 /** A new Job's Sheet, in mm. */
 export const NEW_SHEET: Size = [100, 50];
 
+/** Rotation steps to try, in degrees: each divides a turn, as `core` requires. */
+export const ROTATION_STEPS = [1, 2, 5, 10, 15, 30, 45, 90, 180];
+
 /** Mirrors the `nest_job` command's request. Sizes in mm. */
 export interface JobRequest {
   /** Oriented as printed. */
@@ -26,6 +29,8 @@ export interface JobRequest {
   edgeMarginMm: number;
   /** Bound on the nesting run, in seconds. */
   timeLimitS: number;
+  /** Pieces that may rotate turn by multiples of this, in degrees. */
+  rotationStepDeg: number;
   /**
    * Pieces from the Library or the Job file opened last, each at one of their Sizes, with a fixed
    * quantity or "fill" for as many as fit in the silver left.
@@ -55,6 +60,7 @@ export interface JobSettings {
   separation: number;
   edgeMargin: number;
   timeLimit: number;
+  rotationStep: number;
   items: Item[];
 }
 
@@ -73,6 +79,7 @@ export const toJobRequest = (settings: JobSettings): JobRequest => {
     separationMm: settings.separation,
     edgeMarginMm: settings.edgeMargin,
     timeLimitS: settings.timeLimit,
+    rotationStepDeg: settings.rotationStep,
     items: settings.items.map(({ id, size, quantity, fill, fixed }) => ({
       id,
       size_id: size ?? NORMAL_SIZE_ID,
@@ -98,6 +105,7 @@ export const fromJobRequest = (job: JobRequest): JobSettings => {
     separation: job.separationMm,
     edgeMargin: job.edgeMarginMm,
     timeLimit: job.timeLimitS,
+    rotationStep: job.rotationStepDeg,
     items: job.items.map(({ id, size_id, quantity, fixed }) =>
       quantity === "fill"
         ? { id, size: size_id, quantity: 1, fill: true, fixed }

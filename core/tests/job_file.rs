@@ -5,7 +5,9 @@ use argentajo_core::job_file::{SavedJob, open_job, save_job};
 use argentajo_core::nest::Quantity::{Fill, Fixed};
 use argentajo_core::nest::{Job, JobItem, Paper, nest};
 use argentajo_core::output::OutputOptions;
-use argentajo_core::piece::{NORMAL_SIZE_ID, PrepareOptions, RealSize, SizeInput, piece_at_size, prepare_piece};
+use argentajo_core::piece::{
+    NORMAL_SIZE_ID, PrepareOptions, RealSize, SizeInput, piece_at_size, prepare_piece,
+};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::Duration;
 
@@ -42,6 +44,7 @@ fn saved() -> SavedJob {
         separation_mm: 1.0,
         edge_margin_mm: 1.5,
         time_limit: Duration::from_millis(1500),
+        rotation_step_deg: 1.0,
         items: vec![
             JobItem {
                 piece: prepare("ring.png", 18.3),
@@ -171,6 +174,7 @@ fn a_job_with_pieces_at_different_sizes_round_trips() {
         separation_mm: 1.0,
         edge_margin_mm: 1.5,
         time_limit: Duration::from_millis(500),
+        rotation_step_deg: 1.0,
         items: vec![
             JobItem {
                 piece: piece_at_size(&piece, "small").unwrap(),

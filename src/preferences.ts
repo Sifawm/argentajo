@@ -91,6 +91,7 @@ export const newJob = (defaults: JobDefaults): JobSettings => ({
   ...defaults,
   customPaper: [...PAPERS[defaults.paper]],
   sheets: [NEW_SHEET],
+  rotationStep: 1,
   items: [],
 });
 

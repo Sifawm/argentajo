@@ -32,6 +32,7 @@ import {
   openJob,
   type OutputOptions,
   PAPERS,
+  ROTATION_STEPS,
   type PaperName,
   saveJob,
   saveMySheets,
@@ -69,6 +70,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
   const [separation, setSeparation] = useState(initial.separation);
   const [edgeMargin, setEdgeMargin] = useState(initial.edgeMargin);
   const [timeLimit, setTimeLimit] = useState(initial.timeLimit);
+  const [rotationStep, setRotationStep] = useState(initial.rotationStep);
   const [items, setItems] = useState<Item[]>(initial.items);
   // The copies of its pieces the Job file opened last holds, untouched by the Library.
   const [jobPieces, setJobPieces] = useState<PieceView[]>([]);
@@ -102,6 +104,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     separation,
     edgeMargin,
     timeLimit,
+    rotationStep,
     items: jobItems,
   });
   const valid =
@@ -222,6 +225,7 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
     setSeparation(settings.separation);
     setEdgeMargin(settings.edgeMargin);
     setTimeLimit(settings.timeLimit);
+    setRotationStep(settings.rotationStep);
     setItems(settings.items);
     setJobPieces(pieces);
     setOutput(output);
@@ -590,7 +594,23 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
         </div>
         {/* Outside the scroll area: a sticky footer would hide what Tab focuses underneath it. */}
         <div className="flex flex-col gap-3 border-t border-zinc-200 py-3 pr-2">
-          {numberInput(t("timeLimit"), timeLimit, setTimeLimit, "1")}
+          <div className="flex gap-3">
+            {numberInput(t("timeLimit"), timeLimit, setTimeLimit, "1")}
+            <label className="flex flex-col gap-1 text-sm">
+              {t("rotationStep")}
+              <select
+                value={rotationStep}
+                onChange={(e) => setRotationStep(Number(e.target.value))}
+                className="rounded-md border border-zinc-300 px-2 py-1"
+              >
+                {ROTATION_STEPS.map((step) => (
+                  <option key={step} value={step}>
+                    {step}°
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
           {calculating ? (
             <>
               <button
