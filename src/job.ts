@@ -175,7 +175,7 @@ export const dropMissingItems = (items: Item[], pieces: PieceView[]): Item[] =>
     return piece !== undefined && piece.sizes.some((s) => s.id === item.size);
   });
 
-/** Mirrors `core::output::OutputOptions`: what's printed besides the pieces and the 1 cm square. */
+/** Mirrors `core::output::OutputOptions`: what's printed besides the pieces. */
 export interface OutputOptions {
   sheetOutline: boolean;
   silhouette: boolean;

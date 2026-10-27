@@ -4,7 +4,7 @@ use argentajo_core::nest::Quantity::Fixed;
 use argentajo_core::nest::{Job, JobItem, Layout, Paper, Placement, SheetLayout};
 use argentajo_core::output::{OutputOptions, export_pdf, render_page};
 use argentajo_core::piece::{NORMAL_SIZE_ID, PrepareOptions, RealSize, SizeInput, prepare_piece};
-use resvg::usvg::{Rect, Tree};
+use resvg::usvg::Tree;
 use std::time::Duration;
 
 const PX_PER_MM: f32 = 96.0 / 25.4;
@@ -70,35 +70,13 @@ fn tree(svg: &str) -> Tree {
     Tree::from_str(svg, &Default::default()).unwrap()
 }
 
-fn mm(rect: Rect) -> [f32; 4] {
-    [rect.x(), rect.y(), rect.width(), rect.height()].map(|v| v / PX_PER_MM)
-}
-
 #[test]
-fn every_page_is_the_paper_size_with_a_1_cm_square_outside_the_sheets() {
+fn every_page_is_the_paper_size() {
     let (job, layout) = job_and_layout();
     for page in 0..layout.pages() {
         let tree = tree(&render_page(&job, &layout, page, &OutputOptions::default()));
         assert!((tree.size().width() / PX_PER_MM - 210.0).abs() < 1e-3);
         assert!((tree.size().height() / PX_PER_MM - 148.0).abs() < 1e-3);
-
-        let square = tree
-            .node_by_id("verification")
-            .expect("a verification square on every page");
-        let [x, y, w, h] = mm(square.abs_bounding_box());
-        assert!(
-            (w - 10.0).abs() < 1e-3 && (h - 10.0).abs() < 1e-3,
-            "{w} × {h} mm"
-        );
-        assert!(
-            x >= 5.0 && y >= 5.0 && x + w <= 205.0 && y + h <= 143.0,
-            "inside the margin"
-        );
-        for (sheet, [sw, sh]) in layout.sheets.iter().zip(&job.sheets_mm) {
-            let [sx, sy] = sheet.origin_mm.map(|v| v as f32);
-            let apart = x >= sx + *sw as f32 || x + w <= sx || y >= sy + *sh as f32 || y + h <= sy;
-            assert!(sheet.page != page || apart, "outside every Sheet");
-        }
     }
 }
 
@@ -154,7 +132,7 @@ fn exports_one_pdf_page_per_paper_page_at_the_paper_size() {
         assert!((h - 148.0 * PT_PER_MM).abs() < 0.01, "{h} pt high");
     }
     // svg2pdf draws each page's SVG as a 1 pt square: it must be stretched over the whole page, or
-    // nothing on it, the verification square included, prints at scale.
+    // nothing on it prints at scale.
     let pdf = String::from_utf8_lossy(&pdf);
     let draws: Vec<[f64; 6]> = pdf
         .match_indices(" cm\n/Page Do")

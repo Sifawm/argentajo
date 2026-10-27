@@ -1,7 +1,7 @@
 //! Printed output: a Layout → each page as an SVG in mm, and the PDF made from those same SVGs, so
 //! the preview and the print can't diverge.
 
-use crate::nest::{Job, Layout, VERIFICATION_MM, verification_square};
+use crate::nest::{Job, Layout};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref};
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use svg2pdf::usvg;
 
-/// What goes on the page besides the pieces and the verification square.
+/// What goes on the page besides the pieces.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputOptions {
@@ -28,8 +28,7 @@ impl Default for OutputOptions {
     }
 }
 
-/// Page `page` as an SVG in mm: its Sheets with each Part placed on them as nested, and the
-/// verification square.
+/// Page `page` as an SVG in mm: its Sheets with each Part placed on them as nested.
 pub fn render_page(job: &Job, layout: &Layout, page: usize, options: &OutputOptions) -> String {
     let [page_w, page_h] = job.paper.size_mm;
     let mut svg = format!(
@@ -54,10 +53,9 @@ pub fn render_page(job: &Job, layout: &Layout, page: usize, options: &OutputOpti
             }
         }
     }
-    let [square_x, square_y] = verification_square(job.paper);
     _ = write!(
         svg,
-        r#"</defs><rect width="{page_w}" height="{page_h}" fill="white"/><rect id="verification" x="{square_x}" y="{square_y}" width="{VERIFICATION_MM}" height="{VERIFICATION_MM}" fill="black"/>"#
+        r#"</defs><rect width="{page_w}" height="{page_h}" fill="white"/>"#
     );
     for (sheet, [sheet_w, sheet_h]) in layout.sheets.iter().zip(&job.sheets_mm) {
         if sheet.page != page {
