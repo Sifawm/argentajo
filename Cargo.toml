@@ -8,8 +8,12 @@ edition = "2024"
 license = "MIT"
 
 # Per-pixel work is ~50× slower unoptimised; this keeps the tolerance slider live under `tauri dev`.
+# sparrow and jagua-rs check their invariants with costly `debug_assert!`s: with them on, nesting
+# runs ~50× fewer iterations and a run barely improves on its first Layout.
 [profile.dev.package."*"]
 opt-level = 3
+debug-assertions = false
+overflow-checks = false
 
 [profile.dev.package.argentajo-core]
 opt-level = 3
