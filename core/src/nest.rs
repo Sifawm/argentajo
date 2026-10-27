@@ -52,7 +52,15 @@ pub struct Job {
     pub edge_margin_mm: f64,
     /// Bound on a nesting run.
     pub time_limit: Duration,
+    /// The turns open to Pieces that may rotate: multiples of this, in degrees. It must divide 360.
+    /// Job files saved before it was set nest as before, every degree.
+    #[serde(default = "one_degree")]
+    pub rotation_step_deg: f64,
     pub items: Vec<JobItem>,
+}
+
+fn one_degree() -> f64 {
+    1.0
 }
 
 impl Job {
@@ -214,7 +222,8 @@ pub fn nest(
         && sheets.iter().all(|&[w, h]| w > 0.0 && h > 0.0)
         && job.paper.margin_mm >= 0.0
         && job.separation_mm >= 0.0
-        && job.edge_margin_mm >= 0.0;
+        && job.edge_margin_mm >= 0.0
+        && divides_a_turn(job.rotation_step_deg);
     if !valid {
         return Err(NestError::InvalidSettings);
     }
@@ -400,7 +409,8 @@ fn nest_sheet(
             .iter()
             .map(|&p| apply(into_strip, p))
             .collect();
-        unplaceable[i] |= !fits_across(&contour, piece.allow_rotation, across);
+        let step = piece.allow_rotation.then_some(job.rotation_step_deg);
+        unplaceable[i] |= !fits_across(&contour, step, across);
     }
     let ext_item = |id: usize, demand: u64| {
         let (i, part) = parts[id];
@@ -412,7 +422,9 @@ fn nest_sheet(
                     // Not `Continuous`: sparrow then bounds the strip by area alone and, with
                     // few copies, tries strips shorter than a piece (its loss goes infinite).
                     rotation: if piece.allow_rotation {
-                        ExtRotation::Stepped { step: 1.0 }
+                        ExtRotation::Stepped {
+                            step: job.rotation_step_deg as f32,
+                        }
                     } else {
                         ExtRotation::Discrete { angles: vec![0.0] }
                     },
@@ -730,13 +742,21 @@ fn nest_sheet(
     })
 }
 
-/// Whether `contour` fits in a strip `width` across, in some orientation it may take.
-// ponytail: turns sampled every degree, with 0.01 mm to spare for jagua-rs' offsets; an exact fit
-// between two samples counts as too wide.
-fn fits_across(contour: &[[f64; 2]], allow_rotation: bool, width: f64) -> bool {
-    let turns = if allow_rotation { 0..180 } else { 0..1 };
-    turns.into_iter().any(|degrees| {
-        let (sin, cos) = (degrees as f64).to_radians().sin_cos();
+/// Whether `step` degrees, as jagua-rs takes a `Stepped` rotation, go a whole number of times into
+/// a turn. Written so NaN fails too.
+fn divides_a_turn(step: f64) -> bool {
+    step > 0.0 && step <= 360.0 && ((360.0 / step).round() * step - 360.0).abs() <= 1e-6
+}
+
+/// Whether `contour` fits in a strip `width` across, in some orientation it may take: turned by
+/// multiples of `step` degrees, or not at all without one.
+// ponytail: with 0.01 mm to spare for jagua-rs' offsets; an exact fit between two allowed turns
+// counts as too wide.
+fn fits_across(contour: &[[f64; 2]], step: Option<f64>, width: f64) -> bool {
+    // Half a turn is enough: a strip's width doesn't change with another 180°.
+    let turns = (0..).map(|k| k as f64 * step.unwrap_or(180.0));
+    turns.take_while(|&degrees| degrees < 180.0).any(|degrees| {
+        let (sin, cos) = degrees.to_radians().sin_cos();
         let (min, max) = contour
             .iter()
             .map(|&[x, y]| sin * x + cos * y)

@@ -25,6 +25,7 @@
   "separation": "Separation ({{unit}})",
   "edgeMargin": "Edge margin ({{unit}})",
   "timeLimit": "Maximum time (s)",
+  "rotationStep": "Rotation step",
   "pieces": "Pieces",
   "dropHere": "Drag pieces here from the Library below.",
   "libraryHint": "Library: drag a piece into the list above, or click it to add one more.",

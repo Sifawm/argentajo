@@ -77,6 +77,7 @@ fn job(sheet_mm: [f64; 2], items: Vec<(Piece, Quantity)>) -> Job {
         separation_mm: 1.0,
         edge_margin_mm: 1.5,
         time_limit: TIME_LIMIT,
+        rotation_step_deg: 1.0,
         items: items
             .into_iter()
             .map(|(piece, quantity)| JobItem {
@@ -416,6 +417,38 @@ fn rejects_an_empty_sheet_or_negative_spacing() {
     let mut negative = job([100.0, 50.0], vec![]);
     negative.edge_margin_mm = -1.0;
     assert!(try_nest(&negative, 1).is_err());
+}
+
+#[test]
+fn rejects_a_rotation_step_that_does_not_divide_a_turn() {
+    for step in [0.0, 7.0, 400.0, f64::NAN] {
+        let mut job = job([100.0, 50.0], vec![]);
+        job.rotation_step_deg = step;
+        assert!(
+            matches!(try_nest(&job, 1), Err(NestError::InvalidSettings)),
+            "{step}"
+        );
+    }
+}
+
+#[test]
+fn rotating_pieces_turn_only_by_multiples_of_the_step() {
+    for seed in SEEDS {
+        let mut job = job(
+            [120.0, 70.0],
+            vec![(piece(vec![ell()], true, false), Fixed(8))],
+        );
+        job.rotation_step_deg = 90.0;
+        let layout = nest_valid(&job, seed);
+        assert_eq!(layout.placed, [8], "seed {seed}");
+        for p in layout.sheets.iter().flat_map(|sheet| &sheet.placements) {
+            let [a, b, ..] = p.transform;
+            assert!(
+                a.abs() < 1e-6 || b.abs() < 1e-6,
+                "seed {seed}: {p:?} off the step"
+            );
+        }
+    }
 }
 
 #[test]

@@ -37,6 +37,7 @@ fn job_and_layout() -> (Job, Layout) {
         separation_mm: 1.0,
         edge_margin_mm: 1.5,
         time_limit: Duration::from_secs(1),
+        rotation_step_deg: 1.0,
         items: vec![JobItem {
             piece: ring,
             size_id: NORMAL_SIZE_ID.into(),

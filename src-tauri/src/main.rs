@@ -266,6 +266,7 @@ struct JobRequest {
     separation_mm: f64,
     edge_margin_mm: f64,
     time_limit_s: f64,
+    rotation_step_deg: f64,
     items: Vec<ItemRequest>,
 }
 
@@ -316,6 +317,7 @@ fn resolve(app: &tauri::AppHandle, job: JobRequest) -> Result<Job, String> {
         separation_mm: job.separation_mm,
         edge_margin_mm: job.edge_margin_mm,
         time_limit: Duration::try_from_secs_f64(job.time_limit_s).map_err(|e| e.to_string())?,
+        rotation_step_deg: job.rotation_step_deg,
         items,
     })
 }
@@ -455,7 +457,8 @@ fn save_job_file(
 ) -> Result<bool, String> {
     let mut job = resolve(&app, job)?;
     for item in &mut job.items {
-        item.piece = piece_at_size(&item.piece, &item.size_id).unwrap_or_else(|| item.piece.clone());
+        item.piece =
+            piece_at_size(&item.piece, &item.size_id).unwrap_or_else(|| item.piece.clone());
     }
     let saved = {
         let output = output.lock().unwrap();
@@ -542,6 +545,7 @@ fn open_job_file(
         separation_mm: job.separation_mm,
         edge_margin_mm: job.edge_margin_mm,
         time_limit_s: job.time_limit.as_secs_f64(),
+        rotation_step_deg: job.rotation_step_deg,
         items,
     };
     let result = layout.as_ref().map(|layout| NestView {

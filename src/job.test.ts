@@ -43,6 +43,7 @@ const request = (sizeMm: [number, number]): JobRequest => ({
   separationMm: 1.2,
   edgeMarginMm: 2,
   timeLimitS: 30,
+  rotationStepDeg: 1,
   items: [
     { id: "job-0", size_id: "normal", quantity: { fixed: 3 }, fixed: false },
     { id: "job-1", size_id: "large", quantity: "fill", fixed: false },

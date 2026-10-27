@@ -85,6 +85,7 @@ describe("newJob", () => {
       separation: 1,
       edgeMargin: 1.5,
       timeLimit: 30,
+      rotationStep: 1,
       items: [],
     });
   });

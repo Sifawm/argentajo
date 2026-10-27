@@ -25,6 +25,7 @@
   "separation": "Separación ({{unit}})",
   "edgeMargin": "Margen al borde ({{unit}})",
   "timeLimit": "Tiempo máximo (s)",
+  "rotationStep": "Paso de giro",
   "pieces": "Piezas",
   "dropHere": "Arrastra aquí piezas de la Biblioteca de abajo.",
   "libraryHint": "Biblioteca: arrastra una pieza a la lista de arriba o haz clic para añadir una más.",
