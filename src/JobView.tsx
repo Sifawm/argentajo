@@ -317,307 +317,313 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
 
   return (
     <section className="flex min-h-0 flex-1 gap-6">
-      <div className="flex w-80 shrink-0 flex-col gap-5 overflow-y-auto pr-2">
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={newFile}
-            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
-          >
-            <FilePlus aria-hidden className="size-4" />
-            {t("newJob")}
-          </button>
-          <button
-            type="button"
-            onClick={() => void openFile()}
-            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
-          >
-            <FolderOpen aria-hidden className="size-4" />
-            {t("openJob")}
-          </button>
-          <button
-            type="button"
-            disabled={!valid || calculating}
-            onClick={() => void saveFile()}
-            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-sm disabled:opacity-40"
-          >
-            <Save aria-hidden className="size-4" />
-            {t("saveJob")}
-          </button>
-        </div>
-        <Group title={t("paper")}>
-          <label className="flex flex-col gap-1 text-sm">
-            {t("paperSize")}
-            <select
-              value={paper}
-              onChange={(e) => setPaper(e.target.value as PaperName)}
-              className="rounded-md border border-zinc-300 px-2 py-1"
+      <div className="flex w-80 shrink-0 flex-col">
+        <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto pr-2">
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={newFile}
+              className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
             >
-              {Object.keys(PAPERS).map((name) => (
-                <option key={name} value={name}>
-                  {t(`papers.${name}`)}
-                </option>
-              ))}
-              <option value="custom">{t("papers.custom")}</option>
-            </select>
-          </label>
-          {paper === "custom" && (
-            <div className="flex gap-3">
-              {lengthInput("width", customPaper[0], (w) => setCustomPaper([w, customPaper[1]]))}
-              {lengthInput("height", customPaper[1], (h) => setCustomPaper([customPaper[0], h]))}
-            </div>
-          )}
-          <ToggleGroup.Root
-            type="single"
-            aria-label={t("orientation")}
-            value={landscape ? "landscape" : "portrait"}
-            onValueChange={(value) => value && setLandscape(value === "landscape")}
-            className="inline-flex self-start rounded-md border border-zinc-300"
-          >
-            {(["portrait", "landscape"] as const).map((value) => (
-              <ToggleGroup.Item
-                key={value}
-                value={value}
-                className="px-3 py-1 text-sm first:rounded-l-md last:rounded-r-md data-[state=on]:bg-zinc-900 data-[state=on]:text-white"
-              >
-                {t(value)}
-              </ToggleGroup.Item>
-            ))}
-          </ToggleGroup.Root>
-          {lengthInput("printerMargin", printerMargin, setPrinterMargin)}
-        </Group>
-
-        <Group title={t("sheets")}>
-          <ol className="flex flex-col gap-2">
-            {sheets.map((sheet, i) => {
-              const update = (size: Size) =>
-                setSheets((sheets) => sheets.map((s, j) => (j === i ? size : s)));
-              return (
-                <li key={i} className="flex items-end gap-2">
-                  {lengthInput("width", sheet[0], (w) => update([w, sheet[1]]))}
-                  {lengthInput("height", sheet[1], (h) => update([sheet[0], h]))}
-                  <button
-                    type="button"
-                    aria-label={t("saveSheet")}
-                    title={t("saveSheet")}
-                    disabled={!sheet.every(isPositive) || mySheets.some((s) => sameSize(s, sheet))}
-                    onClick={() => keepMySheets([...mySheets, sheet])}
-                    className="rounded-md p-1 text-zinc-500 hover:text-zinc-900 disabled:opacity-40"
-                  >
-                    <Bookmark aria-hidden className="size-4" />
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={t("removeSheet")}
-                    title={t("removeSheet")}
-                    onClick={() => setSheets((sheets) => sheets.filter((_, j) => j !== i))}
-                    className="rounded-md p-1 text-zinc-500 hover:text-red-700"
-                  >
-                    <X aria-hidden className="size-4" />
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
-          <button
-            type="button"
-            onClick={() => setSheets((sheets) => [...sheets, sheets.at(-1) ?? NEW_SHEET])}
-            className="inline-flex items-center gap-1 self-start rounded-md border border-zinc-300 px-2 py-1 text-sm"
-          >
-            <Plus aria-hidden className="size-4" />
-            {t("addSheet")}
-          </button>
-          {mySheets.length > 0 && (
-            <div className="flex flex-col gap-1">
-              <span className="text-xs text-zinc-500">{t("mySheets")}</span>
-              <ul className="flex flex-wrap gap-2">
-                {mySheets.map((size) => {
-                  const label = formatSize(t, size, unit);
-                  return (
-                    <li
-                      key={size.join("x")}
-                      className="flex items-center rounded-md border border-zinc-300 text-xs"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => setSheets((sheets) => [...sheets, size])}
-                        className="py-1 pr-1 pl-2"
-                      >
-                        {label}
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={t("forgetSheet", { size: label })}
-                        title={t("forgetSheet", { size: label })}
-                        onClick={() => keepMySheets(mySheets.filter((s) => !sameSize(s, size)))}
-                        className="p-1 text-zinc-500 hover:text-red-700"
-                      >
-                        <X aria-hidden className="size-3" />
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          )}
-          <div className="flex gap-3">
-            {lengthInput("separation", separation, setSeparation)}
-            {lengthInput("edgeMargin", edgeMargin, setEdgeMargin)}
+              <FilePlus aria-hidden className="size-4" />
+              {t("newJob")}
+            </button>
+            <button
+              type="button"
+              onClick={() => void openFile()}
+              className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+            >
+              <FolderOpen aria-hidden className="size-4" />
+              {t("openJob")}
+            </button>
+            <button
+              type="button"
+              disabled={!valid || calculating}
+              onClick={() => void saveFile()}
+              className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-sm disabled:opacity-40"
+            >
+              <Save aria-hidden className="size-4" />
+              {t("saveJob")}
+            </button>
           </div>
-        </Group>
-
-        <Group title={t("pieces")}>
-          <ul
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={onDrop}
-            className="flex min-h-20 flex-col gap-2 rounded-md border-2 border-dashed border-zinc-300 p-2"
-          >
-            {jobItems.length === 0 && (
-              <li className="m-auto text-center text-sm text-zinc-500">{t("dropHere")}</li>
+          <Group title={t("paper")}>
+            <label className="flex flex-col gap-1 text-sm">
+              {t("paperSize")}
+              <select
+                value={paper}
+                onChange={(e) => setPaper(e.target.value as PaperName)}
+                className="rounded-md border border-zinc-300 px-2 py-1"
+              >
+                {Object.keys(PAPERS).map((name) => (
+                  <option key={name} value={name}>
+                    {t(`papers.${name}`)}
+                  </option>
+                ))}
+                <option value="custom">{t("papers.custom")}</option>
+              </select>
+            </label>
+            {paper === "custom" && (
+              <div className="flex gap-3">
+                {lengthInput("width", customPaper[0], (w) => setCustomPaper([w, customPaper[1]]))}
+                {lengthInput("height", customPaper[1], (h) => setCustomPaper([customPaper[0], h]))}
+              </div>
             )}
-            {jobItems.map((item) => {
-              const piece = byId.get(item.id)!;
-              return (
-                <li
-                  key={`${item.id}:${item.size}`}
-                  className="flex items-start gap-3 rounded-md border border-zinc-200 p-2"
+            <ToggleGroup.Root
+              type="single"
+              aria-label={t("orientation")}
+              value={landscape ? "landscape" : "portrait"}
+              onValueChange={(value) => value && setLandscape(value === "landscape")}
+              className="inline-flex self-start rounded-md border border-zinc-300"
+            >
+              {(["portrait", "landscape"] as const).map((value) => (
+                <ToggleGroup.Item
+                  key={value}
+                  value={value}
+                  className="px-3 py-1 text-sm first:rounded-l-md last:rounded-r-md data-[state=on]:bg-zinc-900 data-[state=on]:text-white"
                 >
-                  {thumbnail(piece)}
-                  <div className="flex min-w-0 flex-1 flex-col gap-2">
-                    <select
-                      value={item.size}
-                      disabled={item.fixed}
-                      onChange={(e) => changeSize(item, e.target.value)}
-                      className="min-w-0 rounded-md border border-zinc-300 px-2 py-1 text-xs disabled:opacity-60"
-                    >
-                      {piece.sizes.map((size) => (
-                        <option key={size.id} value={size.id}>
-                          {sizeLabel(piece, size.id, unit, t)}
-                        </option>
-                      ))}
-                    </select>
-                    <div className="flex items-center gap-3">
-                      <input
-                        type="number"
-                        min="1"
-                        step="1"
-                        aria-label={t("quantity")}
-                        disabled={item.fill}
-                        value={Number.isNaN(item.quantity) ? "" : item.quantity}
-                        onChange={(e) => {
-                          const quantity = e.target.valueAsNumber;
-                          setItems((items) =>
-                            items.map((i) =>
-                              i.id === item.id && i.size === item.size ? { ...i, quantity } : i,
-                            ),
-                          );
-                        }}
-                        className="w-20 rounded-md border border-zinc-300 px-2 py-1 text-sm disabled:opacity-40"
-                      />
-                      <label className="flex items-center gap-1 text-xs" title={t("fillHint")}>
-                        <input
-                          type="checkbox"
-                          checked={item.fill}
-                          onChange={(e) => {
-                            const fill = e.target.checked;
-                            setItems((items) =>
-                              items.map((i) =>
-                                i.id === item.id && i.size === item.size ? { ...i, fill } : i,
-                              ),
-                            );
-                          }}
-                        />
-                        {t("fill")}
-                      </label>
-                    </div>
-                  </div>
-                  <div className="flex flex-col items-center gap-1">
+                  {t(value)}
+                </ToggleGroup.Item>
+              ))}
+            </ToggleGroup.Root>
+            {lengthInput("printerMargin", printerMargin, setPrinterMargin)}
+          </Group>
+
+          <Group title={t("sheets")}>
+            <ol className="flex flex-col gap-2">
+              {sheets.map((sheet, i) => {
+                const update = (size: Size) =>
+                  setSheets((sheets) => sheets.map((s, j) => (j === i ? size : s)));
+                return (
+                  <li key={i} className="flex items-end gap-2">
+                    {lengthInput("width", sheet[0], (w) => update([w, sheet[1]]))}
+                    {lengthInput("height", sheet[1], (h) => update([sheet[0], h]))}
                     <button
                       type="button"
-                      aria-label={t("remove")}
-                      title={t("remove")}
-                      onClick={() =>
-                        setItems((items) =>
-                          items.filter((i) => !(i.id === item.id && i.size === item.size)),
-                        )
+                      aria-label={t("saveSheet")}
+                      title={t("saveSheet")}
+                      disabled={
+                        !sheet.every(isPositive) || mySheets.some((s) => sameSize(s, sheet))
                       }
+                      onClick={() => keepMySheets([...mySheets, sheet])}
+                      className="rounded-md p-1 text-zinc-500 hover:text-zinc-900 disabled:opacity-40"
+                    >
+                      <Bookmark aria-hidden className="size-4" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={t("removeSheet")}
+                      title={t("removeSheet")}
+                      onClick={() => setSheets((sheets) => sheets.filter((_, j) => j !== i))}
                       className="rounded-md p-1 text-zinc-500 hover:text-red-700"
                     >
                       <X aria-hidden className="size-4" />
                     </button>
-                    <button
-                      type="button"
-                      disabled={item.fixed || !addAnotherSize(items, piece)}
-                      onClick={() => {
-                        const next = addAnotherSize(items, piece);
-                        if (next) setItems(next);
-                      }}
-                      aria-label={t("addAnotherSize")}
-                      title={t("addAnotherSize")}
-                      className="rounded-md p-1 text-zinc-500 hover:text-zinc-900 disabled:opacity-40"
-                    >
-                      <Plus aria-hidden className="size-4" />
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-          <span className="text-xs text-zinc-500">{t("libraryHint")}</span>
-          <ul className="grid grid-cols-4 gap-2">
-            {pieces.map((piece) => (
-              <li key={piece.id}>
-                <button
-                  type="button"
-                  draggable
-                  onDragStart={(e) => e.dataTransfer.setData(DRAG_TYPE, piece.id!)}
-                  onClick={() => add(piece.id!)}
-                  aria-label={t("addPiece", {
-                    size: sizeLabel(piece, piece.sizes[0]?.id ?? "", unit, t),
-                  })}
-                  title={sizeLabel(piece, piece.sizes[0]?.id ?? "", unit, t)}
-                  className="w-full rounded bg-white p-1 shadow-sm"
-                >
-                  {thumbnail(piece, "aspect-square w-full")}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </Group>
-
-        {numberInput(t("timeLimit"), timeLimit, setTimeLimit, "1")}
-        {calculating ? (
-          <>
+                  </li>
+                );
+              })}
+            </ol>
             <button
               type="button"
-              onClick={() => void stopNesting()}
-              className="inline-flex items-center justify-center gap-2 rounded-md bg-zinc-900 px-4 py-2 text-sm text-white"
+              onClick={() => setSheets((sheets) => [...sheets, sheets.at(-1) ?? NEW_SHEET])}
+              className="inline-flex items-center gap-1 self-start rounded-md border border-zinc-300 px-2 py-1 text-sm"
             >
-              <CircleStop aria-hidden className="size-4" />
-              {t("stop")}
+              <Plus aria-hidden className="size-4" />
+              {t("addSheet")}
             </button>
-            {started && <TimeLeft key={started.at} {...started} iterations={iterations} />}
-          </>
-        ) : (
-          <button
-            type="button"
-            disabled={!valid}
-            onClick={() => calculate()}
-            className="inline-flex items-center justify-center gap-2 rounded-md bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-40"
-          >
-            {result && !stale ? (
-              <RefreshCw aria-hidden className="size-4" />
-            ) : (
-              <Play aria-hidden className="size-4" />
+            {mySheets.length > 0 && (
+              <div className="flex flex-col gap-1">
+                <span className="text-xs text-zinc-500">{t("mySheets")}</span>
+                <ul className="flex flex-wrap gap-2">
+                  {mySheets.map((size) => {
+                    const label = formatSize(t, size, unit);
+                    return (
+                      <li
+                        key={size.join("x")}
+                        className="flex items-center rounded-md border border-zinc-300 text-xs"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => setSheets((sheets) => [...sheets, size])}
+                          className="py-1 pr-1 pl-2"
+                        >
+                          {label}
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={t("forgetSheet", { size: label })}
+                          title={t("forgetSheet", { size: label })}
+                          onClick={() => keepMySheets(mySheets.filter((s) => !sameSize(s, size)))}
+                          className="p-1 text-zinc-500 hover:text-red-700"
+                        >
+                          <X aria-hidden className="size-3" />
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
             )}
-            {t(result && !stale ? "recalculate" : "calculate")}
-          </button>
-        )}
-        {error && (
-          <p role="alert" className="text-sm text-red-700">
-            {error}
-          </p>
-        )}
+            <div className="flex gap-3">
+              {lengthInput("separation", separation, setSeparation)}
+              {lengthInput("edgeMargin", edgeMargin, setEdgeMargin)}
+            </div>
+          </Group>
+
+          <Group title={t("pieces")}>
+            <ul
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={onDrop}
+              className="flex min-h-20 flex-col gap-2 rounded-md border-2 border-dashed border-zinc-300 p-2"
+            >
+              {jobItems.length === 0 && (
+                <li className="m-auto text-center text-sm text-zinc-500">{t("dropHere")}</li>
+              )}
+              {jobItems.map((item) => {
+                const piece = byId.get(item.id)!;
+                return (
+                  <li
+                    key={`${item.id}:${item.size}`}
+                    className="flex items-start gap-3 rounded-md border border-zinc-200 p-2"
+                  >
+                    {thumbnail(piece)}
+                    <div className="flex min-w-0 flex-1 flex-col gap-2">
+                      <select
+                        value={item.size}
+                        disabled={item.fixed}
+                        onChange={(e) => changeSize(item, e.target.value)}
+                        className="min-w-0 rounded-md border border-zinc-300 px-2 py-1 text-xs disabled:opacity-60"
+                      >
+                        {piece.sizes.map((size) => (
+                          <option key={size.id} value={size.id}>
+                            {sizeLabel(piece, size.id, unit, t)}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          aria-label={t("quantity")}
+                          disabled={item.fill}
+                          value={Number.isNaN(item.quantity) ? "" : item.quantity}
+                          onChange={(e) => {
+                            const quantity = e.target.valueAsNumber;
+                            setItems((items) =>
+                              items.map((i) =>
+                                i.id === item.id && i.size === item.size ? { ...i, quantity } : i,
+                              ),
+                            );
+                          }}
+                          className="w-20 rounded-md border border-zinc-300 px-2 py-1 text-sm disabled:opacity-40"
+                        />
+                        <label className="flex items-center gap-1 text-xs" title={t("fillHint")}>
+                          <input
+                            type="checkbox"
+                            checked={item.fill}
+                            onChange={(e) => {
+                              const fill = e.target.checked;
+                              setItems((items) =>
+                                items.map((i) =>
+                                  i.id === item.id && i.size === item.size ? { ...i, fill } : i,
+                                ),
+                              );
+                            }}
+                          />
+                          {t("fill")}
+                        </label>
+                      </div>
+                    </div>
+                    <div className="flex flex-col items-center gap-1">
+                      <button
+                        type="button"
+                        aria-label={t("remove")}
+                        title={t("remove")}
+                        onClick={() =>
+                          setItems((items) =>
+                            items.filter((i) => !(i.id === item.id && i.size === item.size)),
+                          )
+                        }
+                        className="rounded-md p-1 text-zinc-500 hover:text-red-700"
+                      >
+                        <X aria-hidden className="size-4" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={item.fixed || !addAnotherSize(items, piece)}
+                        onClick={() => {
+                          const next = addAnotherSize(items, piece);
+                          if (next) setItems(next);
+                        }}
+                        aria-label={t("addAnotherSize")}
+                        title={t("addAnotherSize")}
+                        className="rounded-md p-1 text-zinc-500 hover:text-zinc-900 disabled:opacity-40"
+                      >
+                        <Plus aria-hidden className="size-4" />
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+            <span className="text-xs text-zinc-500">{t("libraryHint")}</span>
+            <ul className="grid grid-cols-4 gap-2">
+              {pieces.map((piece) => (
+                <li key={piece.id}>
+                  <button
+                    type="button"
+                    draggable
+                    onDragStart={(e) => e.dataTransfer.setData(DRAG_TYPE, piece.id!)}
+                    onClick={() => add(piece.id!)}
+                    aria-label={t("addPiece", {
+                      size: sizeLabel(piece, piece.sizes[0]?.id ?? "", unit, t),
+                    })}
+                    title={sizeLabel(piece, piece.sizes[0]?.id ?? "", unit, t)}
+                    className="w-full rounded bg-white p-1 shadow-sm"
+                  >
+                    {thumbnail(piece, "aspect-square w-full")}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </Group>
+        </div>
+        {/* Outside the scroll area: a sticky footer would hide what Tab focuses underneath it. */}
+        <div className="flex flex-col gap-3 border-t border-zinc-200 py-3 pr-2">
+          {numberInput(t("timeLimit"), timeLimit, setTimeLimit, "1")}
+          {calculating ? (
+            <>
+              <button
+                type="button"
+                onClick={() => void stopNesting()}
+                className="inline-flex items-center justify-center gap-2 rounded-md bg-zinc-900 px-4 py-2 text-sm text-white"
+              >
+                <CircleStop aria-hidden className="size-4" />
+                {t("stop")}
+              </button>
+              {started && <TimeLeft key={started.at} {...started} iterations={iterations} />}
+            </>
+          ) : (
+            <button
+              type="button"
+              disabled={!valid}
+              onClick={() => calculate()}
+              className="inline-flex items-center justify-center gap-2 rounded-md bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-40"
+            >
+              {result && !stale ? (
+                <RefreshCw aria-hidden className="size-4" />
+              ) : (
+                <Play aria-hidden className="size-4" />
+              )}
+              {t(result && !stale ? "recalculate" : "calculate")}
+            </button>
+          )}
+          {error && (
+            <p role="alert" className="text-sm text-red-700">
+              {error}
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col gap-3">
