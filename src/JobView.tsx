@@ -42,7 +42,7 @@ import {
   toJobRequest,
 } from "./job";
 import type { PieceView } from "./library";
-import { sizeLabel } from "./library";
+import { decoded, sizeLabel } from "./library";
 import {
   formatSize,
   fromUnit,
@@ -123,11 +123,19 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
 
   useEffect(() => {
     if (!result) return;
+    let stale = false;
     const urls = result.view.pages.map((svg) =>
       URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" })),
     );
-    setPageUrls(urls);
-    return () => urls.forEach((url) => URL.revokeObjectURL(url));
+    // Shown once decoded, so the pages swap without a blank frame in between.
+    void Promise.all(urls.map(decoded)).then(() => {
+      if (!stale) setPageUrls(urls);
+    });
+    // The pages on show stay drawn: an image keeps its pixels once its URL is revoked.
+    return () => {
+      stale = true;
+      urls.forEach((url) => URL.revokeObjectURL(url));
+    };
   }, [result]);
 
   useEffect(() => {
@@ -733,7 +741,8 @@ export default function JobView({ pieces }: { pieces: PieceView[] }) {
             >
               {pageUrls.map((url, i) => (
                 <img
-                  key={url}
+                  // By page, not URL: a new element would start out blank.
+                  key={i}
                   src={url}
                   alt={t("preview", { page: i + 1 })}
                   className="h-full max-w-full shrink-0 object-contain"

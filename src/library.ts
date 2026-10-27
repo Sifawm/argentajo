@@ -124,6 +124,13 @@ export const splitToLibrary = (image: Uint8Array, options: PrepareOptions, edits
 
 export const listLibrary = () => invoke<PieceView[]>("list_library");
 
+/** Resolves once the image at `url` is decoded, so an element shows it at once; never rejects. */
+export const decoded = (url: string) => {
+  const image = new Image();
+  image.src = url;
+  return image.decode().catch(() => {});
+};
+
 /** What the editor reopens a Library piece from. */
 export interface OpenedPiece {
   image: Uint8Array<ArrayBuffer>;
