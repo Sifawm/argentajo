@@ -688,15 +688,13 @@ fn sheets_go_in_rows_inside_the_margin_and_overflow_onto_new_pages() {
 }
 
 #[test]
-fn sheets_leave_room_for_the_verification_square() {
-    // 200 × 287 mm inside the printer margin; the square takes its bottom-right 10 mm, 5 mm apart.
-    let over_it = job([200.0, 287.0], vec![]);
+fn a_sheet_may_take_the_whole_printable_area_but_no_more() {
+    // 200 × 287 mm inside the printer margin.
+    nest_valid(&job([200.0, 287.0], vec![]), 1);
     assert!(matches!(
-        try_nest(&over_it, 1),
+        try_nest(&job([200.1, 287.0], vec![]), 1),
         Err(NestError::SheetOffPaper)
     ));
-    nest_valid(&job([200.0, 272.0], vec![]), 1);
-    nest_valid(&job([185.0, 287.0], vec![]), 1);
 }
 
 #[test]

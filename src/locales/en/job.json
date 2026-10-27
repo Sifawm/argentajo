@@ -60,7 +60,7 @@
   "exportPdf": "Export PDF",
   "exportFailed": "Could not export the PDF: {{error}}",
   "exported": "PDF saved",
-  "printAtActualSize": "Print it at 100 % (actual size): never “fit to page” or any other scaling. Then check with a ruler that the black square measures exactly 1 × 1 cm.",
+  "printAtActualSize": "Print it at 100 % (actual size): never “fit to page” or any other scaling.",
   "ok": "OK",
   "newJob": "New job",
   "openJob": "Open job",

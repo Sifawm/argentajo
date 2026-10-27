@@ -165,7 +165,7 @@ pub struct Placement {
 pub enum NestError {
     /// There is no Sheet, a size isn't positive, or a separation or margin is negative.
     InvalidSettings,
-    /// A Sheet doesn't fit on the paper inside the printer margin, beside the verification square.
+    /// A Sheet doesn't fit on the paper inside the printer margin.
     SheetOffPaper,
     /// The nesting engine failed.
     Engine(String),
@@ -180,7 +180,7 @@ impl std::fmt::Display for NestError {
             ),
             Self::SheetOffPaper => write!(
                 f,
-                "the sheet does not fit on the paper inside the printer margin, beside the 1 cm verification square"
+                "the sheet does not fit on the paper inside the printer margin"
             ),
             Self::Engine(e) => write!(f, "nesting failed: {e}"),
         }
@@ -191,17 +191,6 @@ impl std::error::Error for NestError {}
 
 /// Between Sheets on the page, so the paper can be cut apart per Sheet.
 const SHEET_GAP_MM: f64 = 5.0;
-
-/// Side of the square on every page that checks the print's scale with a ruler.
-pub(crate) const VERIFICATION_MM: f64 = 10.0;
-
-/// Top-left corner of the verification square: the bottom right of the printable area, where the
-/// Sheets, placed from the top left, leave room for it.
-pub(crate) fn verification_square(paper: Paper) -> [f64; 2] {
-    let [w, h] = paper.size_mm;
-    let m = paper.margin_mm;
-    [w - m - VERIFICATION_MM, h - m - VERIFICATION_MM]
-}
 
 /// Nests the Sheets in order, each taking what it can of the fixed quantities the ones before it
 /// left; copies no Sheet takes are missing. Fill items go into every Sheet's leftover silver. The
@@ -307,23 +296,18 @@ pub fn nest(
 }
 
 /// The Sheets on the pages, still empty: in rows from the top left inside the printer margin,
-/// `SHEET_GAP_MM` apart and from the verification square, starting a new row when one doesn't fit
+/// `SHEET_GAP_MM` apart, starting a new row when one doesn't fit
 /// in this one and a new page when it doesn't fit in the next.
 fn place_sheets(paper: Paper, sheets: &[[f64; 2]]) -> Result<Vec<SheetLayout>, NestError> {
     let Paper {
         size_mm: [paper_w, paper_h],
         margin_mm: m,
     } = paper;
-    let [square_x, square_y] = verification_square(paper);
     let (mut page, mut x, mut y, mut row_h) = (0, m, m, 0.0f64);
     sheets
         .iter()
         .map(|&[w, h]| {
-            let fits = |x: f64, y: f64| {
-                x + w <= paper_w - m
-                    && y + h <= paper_h - m
-                    && (x + w <= square_x - SHEET_GAP_MM || y + h <= square_y - SHEET_GAP_MM)
-            };
+            let fits = |x: f64, y: f64| x + w <= paper_w - m && y + h <= paper_h - m;
             if !fits(x, y) {
                 (x, y, row_h) = (m, y + row_h + SHEET_GAP_MM, 0.0);
             }

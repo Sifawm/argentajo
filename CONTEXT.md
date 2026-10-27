@@ -90,9 +90,6 @@ Taking an Item out of the Job from the Layout and nesting what's left again.
 The Layout printed at exact scale, one or more pages, glued on the silver to cut along.
 _Avoid_: Print, stencil
 
-**Verification square** (cuadrado de verificación):
-A black 1 × 1 cm square on every page, to check with a ruler that it printed at 100 %.
-
 **Sheet outline** (contorno de las láminas):
 An optional line round each Sheet on the Template, to know where to glue it.
 
