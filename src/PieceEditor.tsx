@@ -39,6 +39,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import {
   addToLibrary,
+  decoded,
   type Edits,
   MIN_PPI,
   type PieceView,
@@ -465,7 +466,9 @@ export default function PieceEditor({ image, type, saved, onClose, onSaved }: Pr
     let stale = false;
     const timer = setTimeout(() => {
       previewPiece(image, previewOptions, edits).then(
-        (piece) => {
+        async (piece) => {
+          // Shown once decoded, so the old one doesn't give way to a blank frame first.
+          await decoded(piece.image);
           if (stale) return;
           setPreview(piece);
           setError(undefined);
