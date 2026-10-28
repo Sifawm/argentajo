@@ -16,5 +16,14 @@
     "jobHint": "Defaults for each new job. Jobs already open keep their own values.",
     "saveFailed": "Could not save the preferences: {{error}}",
     "close": "Close"
+  },
+  "update": {
+    "title": "A new version is available",
+    "available": "Argentajo {{version}} is available; you have {{current}}.",
+    "saveFirst": "The app will restart: save your work before updating.",
+    "later": "Later",
+    "install": "Update and restart",
+    "installing": "Downloading…",
+    "failed": "Could not update: {{error}}"
   }
 }

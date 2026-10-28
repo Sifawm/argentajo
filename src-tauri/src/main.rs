@@ -25,6 +25,12 @@ fn core_version() -> &'static str {
     argentajo_core::version()
 }
 
+/// Whether this install can update itself: on Linux only the AppImage can, not the .deb.
+#[tauri::command]
+fn updates_supported() -> bool {
+    !cfg!(target_os = "linux") || std::env::var_os("APPIMAGE").is_some()
+}
+
 /// A Piece as the frontend sees it: the cleaned PNG as a data URL next to its metadata.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -629,11 +635,14 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(Nesting::default())
         .manage(Mutex::new(Output::default()))
         .manage(JobPieces::default())
         .invoke_handler(tauri::generate_handler![
             core_version,
+            updates_supported,
             preview_piece,
             add_to_library,
             update_piece,

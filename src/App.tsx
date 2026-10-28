@@ -7,6 +7,7 @@ import type { PieceView } from "./library";
 import LibraryView from "./LibraryView";
 import { type Preferences, PreferencesContext } from "./preferences";
 import PreferencesDialog from "./PreferencesDialog";
+import UpdateDialog from "./UpdateDialog";
 
 const VIEWS = ["library", "job"] as const;
 
@@ -67,6 +68,7 @@ export default function App({ initialPreferences }: { initialPreferences: Prefer
           <JobView pieces={pieces} />
         </Tabs.Content>
       </Tabs.Root>
+      <UpdateDialog />
     </PreferencesContext>
   );
 }
