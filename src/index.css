@@ -4,6 +4,16 @@ body {
   @apply bg-zinc-50 text-zinc-900 antialiased;
 }
 
+/* WebKitGTK draws selects as GTK buttons; draw them like the text inputs instead.
+   Unlayered so the arrow's room survives the px-* utilities. */
+select {
+  appearance: none;
+  background: transparent
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")
+    no-repeat right 0.5rem center / 1em;
+  padding-right: 2rem;
+}
+
 /* Shows transparency behind cleaned pieces. */
 @utility checkerboard {
   background: repeating-conic-gradient(var(--color-zinc-200) 0 25%, white 0 50%) 0 0 / 16px 16px;
