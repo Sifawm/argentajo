@@ -12,9 +12,17 @@
     "windows": [{ "title": "Argentajo", "width": 1200, "height": 800, "dragDropEnabled": false }],
     "security": { "csp": null }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ1REIwNDczNjkzODZEQ0YKUldUUGJUaHBjd1RiUmZqSmIrdXlFRldEN3hCZFpBRXFGS1VXR0hoK09rb1Y5cTNLQUtYZWIveTcK",
+      "endpoints": ["https://github.com/Sifawm/argentajo/releases/latest/download/latest.json"],
+      "windows": { "installMode": "passive" }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

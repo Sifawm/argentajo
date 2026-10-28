@@ -43,11 +43,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # Generated here rather than with tauri-action's generateReleaseNotes, which leaves them out
+      # of latest.json, where the app's update dialog reads them.
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo 'body<<EOF'
+            gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$GITHUB_REF_NAME" -q .body
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Argentajo ${{ github.ref_name }}
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
-          args: --bundles ${{ runner.os == 'Windows' && 'msi,nsis' || 'appimage,deb' }}
+          # Only NSIS on Windows: latest.json has one installer per platform, and mixing it with
+          # an MSI install would leave two copies. The .deb is kept but can't update itself.
+          args: --bundles ${{ runner.os == 'Windows' && 'nsis' || 'appimage,deb' }}

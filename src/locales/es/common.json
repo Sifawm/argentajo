@@ -16,5 +16,14 @@
     "jobHint": "Valores de cada trabajo nuevo. Los trabajos ya abiertos conservan los suyos.",
     "saveFailed": "No se pudieron guardar las preferencias: {{error}}",
     "close": "Cerrar"
+  },
+  "update": {
+    "title": "Hay una versión nueva",
+    "available": "Argentajo {{version}} está disponible; tienes la {{current}}.",
+    "saveFirst": "La app se reiniciará: guarda tu trabajo antes de actualizar.",
+    "later": "Más tarde",
+    "install": "Actualizar y reiniciar",
+    "installing": "Descargando…",
+    "failed": "No se pudo actualizar: {{error}}"
   }
 }
